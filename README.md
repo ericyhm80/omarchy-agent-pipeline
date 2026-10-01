@@ -33,6 +33,15 @@ the request as, which model it chose, what it retrieved, which tools it ran, and
 
 ![pipeline graph](preview.png)
 
+## Compact, bilingual layout
+
+The canvas is sized to the graph's own bounding box (`contentBounds`), not to a fixed canvas
+area, so the panel stays tight whatever a runtime draws. Node cards carry the name in Chinese
+with `labelEn` (or the stage id) plus the runtime detail and duration underneath, and the panel
+labels are bilingual: `Agent Pipeline · 智能体流水线`, `DONE · 完成`, `均值/Duration`, `输入/In`,
+`输出/Out`, `缓存/Cache`, `RECENT · 最近`. Edge labels are skipped on short hops so they never
+sit on top of a node caption.
+
 ## How it gets data
 
 The plugin is passive: it watches one documented local file and makes no network requests.

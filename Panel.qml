@@ -66,6 +66,14 @@ Panel {
     return root.dim
   }
 
+  function stateLabel(state) {
+    var s = String(state || "").toLowerCase()
+    if (s === "done") return "DONE · 完成"
+    if (s === "running") return "RUNNING · 运行中"
+    if (s === "error") return "ERROR · 失败"
+    return "IDLE · 空闲"
+  }
+
   function withAlpha(c, a) {
     return Qt.rgba(c.r, c.g, c.b, a)
   }
@@ -158,7 +166,7 @@ Panel {
           spacing: Style.space(8)
 
           Text {
-            text: "Agent pipeline"
+            text: "Agent Pipeline · 智能体流水线"
             color: root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.subtitle
@@ -187,7 +195,7 @@ Panel {
             Text {
               id: badgeLabel
               anchors.centerIn: parent
-              text: String(latest ? (latest.state || "unknown") : "idle").toUpperCase()
+              text: root.stateLabel(latest ? latest.state : "idle")
               color: root.stateColor(latest ? latest.state : "idle")
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -200,94 +208,109 @@ Panel {
         Canvas {
           id: graph
           width: column.width
-          height: Math.round(width * (root.arch.height || 380) / (root.arch.width || 720))
+          readonly property var bounds: Model.contentBounds(root.arch)
+          height: Math.round(width * bounds.h / bounds.w)
           antialiasing: true
 
           onPaint: {
             var ctx = getContext("2d")
-            var arch = root.arch
-            var sx = width / (arch.width || 720)
-            var sy = height / (arch.height || 380)
             ctx.reset()
             ctx.clearRect(0, 0, width, height)
 
-            // ---- edges
+            var arch = root.arch
+            var b = bounds
+            var k = width / b.w
+            ctx.save()
+            ctx.translate(-b.x * k, -b.y * k)
+            ctx.scale(k, k)
+
+            // ---- edges -------------------------------------------------
             var edges = arch.edges || []
             for (var i = 0; i < edges.length; i++) {
               var e = edges[i]
               var a = Model.nodeById(arch, e.from)
-              var b = Model.nodeById(arch, e.to)
-              if (!a || !b) continue
-              var x1 = (a.x + a.w) * sx, y1 = (a.y + a.h / 2) * sy
-              var x2 = b.x * sx, y2 = (b.y + b.h / 2) * sy
+              var c = Model.nodeById(arch, e.to)
+              if (!a || !c) continue
+              var x1 = a.x + a.w, y1 = a.y + a.h / 2
+              var x2 = c.x, y2 = c.y + c.h / 2
+              var mid = (x1 + x2) / 2
               var live = Model.edgeTraversed(root.latest, e.from, e.to)
-              ctx.strokeStyle = live ? root.withAlpha(root.accent, 0.85) : root.withAlpha(root.foreground, 0.16)
-              ctx.lineWidth = live ? Math.max(1.4, 1.8 * sx) : 1
+
+              ctx.strokeStyle = live ? root.withAlpha(root.accent, 0.9) : root.withAlpha(root.foreground, 0.14)
+              ctx.lineWidth = live ? 1.6 : 1
               ctx.beginPath()
               ctx.moveTo(x1, y1)
-              var mid = (x1 + x2) / 2
               ctx.bezierCurveTo(mid, y1, mid, y2, x2, y2)
               ctx.stroke()
 
-              // ---- information flowing along the traversed path
+              // information flowing along the path the request took
               if (live && root.animating) {
                 for (var d = 0; d < 3; d++) {
                   var t = (root.phase + d / 3) % 1.0
-                  var px = bezier(t, x1, mid, mid, x2)
-                  var py = bezier(t, y1, y1, y2, y2)
                   ctx.beginPath()
-                  ctx.arc(px, py, Math.max(1.6, 2.6 * sx), 0, Math.PI * 2)
+                  ctx.arc(bezier(t, x1, mid, mid, x2), bezier(t, y1, y1, y2, y2), 2.1, 0, Math.PI * 2)
                   ctx.fillStyle = root.accent
                   ctx.fill()
                 }
               }
-              if (e.label && sx > 0.55) {
-                ctx.fillStyle = root.withAlpha(root.dim, 0.9)
-                ctx.font = "500 " + Math.round(9 * sx) + "px " + root.fontFamily
-                ctx.fillText(String(e.label), (x1 + x2) / 2 - 18 * sx, (y1 + y2) / 2 - 4 * sx)
+              // Label placement: skip short hops (the text would sit on a node
+              // caption) and lift the rest clear of the cards.
+              if (e.label && Math.abs(x2 - x1) > 96) {
+                ctx.fillStyle = root.withAlpha(root.dim, 0.8)
+                ctx.font = "400 8px " + root.fontFamily
+                var lx = bezier(0.5, x1, mid, mid, x2)
+                var ly = bezier(0.5, y1, y1, y2, y2)
+                var text = String(e.label)
+                ctx.fillText(text, lx - ctx.measureText(text).width / 2, ly - 7)
               }
             }
 
-            // ---- nodes
+            // ---- nodes -------------------------------------------------
             var nodes = arch.nodes || []
             for (var n = 0; n < nodes.length; n++) {
               var node = nodes[n]
               var status = Model.nodeStatus(root.latest, node.id)
-              var color = root.nodeColor(status)
-              var x = node.x * sx, y = node.y * sy
-              var w = node.w * sx, h = node.h * sy
-              var r = Math.min(10, h / 4)
+              var color = nodeColor(status)
+              var r = 7
 
               ctx.beginPath()
-              ctx.moveTo(x + r, y)
-              ctx.arcTo(x + w, y, x + w, y + h, r)
-              ctx.arcTo(x + w, y + h, x, y + h, r)
-              ctx.arcTo(x, y + h, x, y, r)
-              ctx.arcTo(x, y, x + w, y, r)
+              ctx.moveTo(node.x + r, node.y)
+              ctx.arcTo(node.x + node.w, node.y, node.x + node.w, node.y + node.h, r)
+              ctx.arcTo(node.x + node.w, node.y + node.h, node.x, node.y + node.h, r)
+              ctx.arcTo(node.x, node.y + node.h, node.x, node.y, r)
+              ctx.arcTo(node.x, node.y, node.x + node.w, node.y, r)
               ctx.closePath()
-              ctx.fillStyle = status
-                ? root.withAlpha(color, status === "error" ? 0.22 : 0.12)
-                : root.withAlpha(root.foreground, 0.04)
+              ctx.fillStyle = status ? root.withAlpha(color, status === "error" ? 0.2 : 0.11)
+                                     : root.withAlpha(root.foreground, 0.04)
               ctx.fill()
-              ctx.strokeStyle = status ? color : root.withAlpha(root.foreground, 0.22)
-              ctx.lineWidth = status === "error" || status === "running" ? 2 : 1
+              ctx.strokeStyle = status ? color : root.withAlpha(root.foreground, 0.2)
+              ctx.lineWidth = (status === "error" || status === "running") ? 1.7 : 1
               ctx.stroke()
 
+              // Chinese name on the card, English + runtime detail underneath
               ctx.fillStyle = status ? color : root.dim
-              ctx.font = "600 " + Math.round(11 * sx) + "px " + root.fontFamily
+              ctx.font = "600 10.5px " + root.fontFamily
               var label = String(node.label || node.id)
-              ctx.fillText(label, x + w / 2 - ctx.measureText(label).width / 2, y + h / 2 + 4 * sy)
+              ctx.fillText(label, node.x + node.w / 2 - ctx.measureText(label).width / 2, node.y + node.h / 2 + 3.5)
 
+              var bits = []
+              var en = Model.nodeSubtitle(node)
+              if (en) bits.push(en)
               var detail = Model.nodeDetail(root.latest, node.id)
+              if (detail) bits.push(detail)
               var ms = Model.fmtMs(Model.nodeMs(root.latest, node.id))
-              var sub = [detail, ms].filter(function(v) { return v !== "" }).join(" · ")
-              if (sub !== "" && sx > 0.62) {
+              if (ms) bits.push(ms)
+              var sub = bits.join(" · ")
+              if (sub !== "") {
                 ctx.fillStyle = root.withAlpha(root.dim, 0.95)
-                ctx.font = "400 " + Math.round(9 * sx) + "px " + root.fontFamily
-                var text = sub.length > 26 ? sub.slice(0, 25) + "…" : sub
-                ctx.fillText(text, x + w / 2 - ctx.measureText(text).width / 2, y + h + 12 * sy)
+                ctx.font = "400 8px " + root.fontFamily
+                if (ctx.measureText(sub).width > node.w + 34)
+                  sub = sub.slice(0, Math.max(6, Math.floor(sub.length * (node.w + 34) / ctx.measureText(sub).width) - 1)) + "…"
+                ctx.fillText(sub, node.x + node.w / 2 - ctx.measureText(sub).width / 2, node.y + node.h + 10)
               }
             }
+
+            ctx.restore()
           }
 
           function bezier(t, p0, p1, p2, p3) {
@@ -307,7 +330,7 @@ Panel {
         Text {
           width: parent.width
           visible: !root.latest
-          text: "No requests recorded yet. Any agent runtime can write " + root.dataPath
+          text: "暂无记录 / No requests recorded yet. Any agent runtime can append to " + root.dataPath
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
@@ -331,10 +354,10 @@ Panel {
           text: {
             if (!root.latest) return ""
             var t = root.latest.tokens || {}
-            var bits = ["耗时 " + (Model.fmtMs(Model.durationMs(root.latest)) || "0ms")]
-            if (t.input) bits.push("输入 " + Model.fmtTokens(t.input))
-            if (t.output) bits.push("输出 " + Model.fmtTokens(t.output))
-            if (t.cacheRead) bits.push("缓存 " + Model.fmtTokens(t.cacheRead))
+            var bits = ["耗时/Duration " + (Model.fmtMs(Model.durationMs(root.latest)) || "0ms")]
+            if (t.input) bits.push("输入/In " + Model.fmtTokens(t.input))
+            if (t.output) bits.push("输出/Out " + Model.fmtTokens(t.output))
+            if (t.cacheRead) bits.push("缓存/Cache " + Model.fmtTokens(t.cacheRead))
             var cost = Model.fmtCost(t.costUsd)
             if (cost !== "") bits.push(cost)
             if (root.latest.model) bits.push(root.latest.model)
@@ -384,7 +407,7 @@ Panel {
 
         Text {
           visible: root.recent.length > 0
-          text: "RECENT"
+          text: "RECENT · 最近"
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption

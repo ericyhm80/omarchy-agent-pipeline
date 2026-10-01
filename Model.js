@@ -33,17 +33,17 @@ function parse(text) {
 // Shipped default graph, mirroring the writer's default so the widget renders
 // something meaningful before any runtime defines its own architecture.
 var DEFAULT_ARCH = {
-  width: 720, height: 380,
+  width: 712, height: 236,
   nodes: [
-    { id: "input",      label: "Owner 命令",  x: 8,   y: 158, w: 116, h: 46 },
-    { id: "router",     label: "分类 / 路由", x: 156, y: 158, w: 124, h: 46 },
-    { id: "context",    label: "上下文装配",  x: 312, y: 58,  w: 124, h: 46 },
-    { id: "memory",     label: "记忆检索",    x: 312, y: 158, w: 124, h: 46 },
-    { id: "model",      label: "模型调用",    x: 312, y: 258, w: 124, h: 46 },
-    { id: "tools",      label: "工具执行",    x: 468, y: 208, w: 116, h: 46 },
-    { id: "verify",     label: "校验 / 遥测", x: 468, y: 108, w: 116, h: 46 },
-    { id: "human_gate", label: "Human Gate",  x: 620, y: 208, w: 92,  h: 46 },
-    { id: "output",     label: "输出完成",    x: 612, y: 58,  w: 100, h: 46 }
+    { id: "input",      label: "命令输入",    labelEn: "Input",              x: 6,   y: 96,  w: 122, h: 42 },
+    { id: "router",     label: "分类 / 路由", labelEn: "Classify + Route",   x: 146, y: 96,  w: 128, h: 42 },
+    { id: "context",    label: "上下文装配",  labelEn: "Context",            x: 292, y: 12,  w: 122, h: 42 },
+    { id: "memory",     label: "记忆检索",    labelEn: "Memory",             x: 292, y: 96,  w: 122, h: 42 },
+    { id: "model",      label: "模型调用",    labelEn: "Model",              x: 292, y: 180, w: 122, h: 42 },
+    { id: "tools",      label: "工具执行",    labelEn: "Tools",              x: 432, y: 138, w: 118, h: 42 },
+    { id: "verify",     label: "校验 / 遥测", labelEn: "Verify",             x: 432, y: 54,  w: 118, h: 42 },
+    { id: "human_gate", label: "人工确认",    labelEn: "Human Gate",         x: 584, y: 180, w: 122, h: 42 },
+    { id: "output",     label: "输出完成",    labelEn: "Output",             x: 584, y: 54,  w: 122, h: 42 }
   ],
   edges: [
     { from: "input", to: "router" },
@@ -59,10 +59,32 @@ var DEFAULT_ARCH = {
   ]
 }
 
+// Bounding box of the drawn graph, so the canvas can be sized to the content
+// instead of to the declared canvas area (keeps the panel compact).
+function contentBounds(arch) {
+  var nodes = (arch && arch.nodes) || []
+  if (!nodes.length) return { x: 0, y: 0, w: arch && arch.width || 712, h: arch && arch.height || 236 }
+  var x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity
+  for (var i = 0; i < nodes.length; i++) {
+    var n = nodes[i]
+    x1 = Math.min(x1, Number(n.x) || 0)
+    y1 = Math.min(y1, Number(n.y) || 0)
+    x2 = Math.max(x2, (Number(n.x) || 0) + (Number(n.w) || 0))
+    y2 = Math.max(y2, (Number(n.y) || 0) + (Number(n.h) || 0))
+  }
+  var pad = 20   // room for the per-node caption line under each card
+  return { x: Math.max(0, x1 - 4), y: Math.max(0, y1 - 4), w: (x2 - x1) + 8, h: (y2 - y1) + pad }
+}
+
+
 function architecture(data) {
   var a = data && data.architecture
   if (!a || !a.nodes || !a.nodes.length) return DEFAULT_ARCH
   return a
+}
+
+function nodeSubtitle(node) {
+  return String((node && (node.labelEn || "")) || "")
 }
 
 function nodeById(arch, id) {
