@@ -312,6 +312,8 @@ def main() -> int:
                        "tokens": {"input": 0, "output": 0, "cacheRead": 0, "costUsd": 0.0},
                        "nodes": [], "edges": [], "issues": []}
                 data["requests"].append(row)
+            if isinstance(patch.get("architecture"), dict):
+                row["architecture"] = patch["architecture"]
             for key in ("title", "agent", "state", "taskClass", "route", "model", "summary"):
                 if patch.get(key) is not None:
                     row[key] = patch[key]

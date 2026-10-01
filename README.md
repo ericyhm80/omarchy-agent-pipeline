@@ -77,6 +77,10 @@ $XDG_STATE_HOME/omarchy/agent-pipeline/requests.json      # usually ~/.local/sta
 }
 ```
 
+A request may also carry its **own** `architecture`: that is how a multi-step (orchestrator) run
+draws its plan — the steps become nodes and `depends_on` becomes edges — instead of the shared
+pipeline graph. The panel picks the request's graph when it has one and the global graph otherwise.
+
 Omit `architecture` and the widget falls back to the pipeline it ships with, so a runtime only
 has to write `requests`. `status` accepts `ok`, `running`, `warn`, `error`, `skipped`;
 `state` accepts `running`, `done`, `error`; `issues[].level` accepts `info`, `warn`, `error`.

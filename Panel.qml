@@ -31,7 +31,6 @@ Panel {
     + "/omarchy/agent-pipeline/requests.json"
 
   property var snapshot: Model.parse("")
-  readonly property var arch: Model.architecture(snapshot)
   readonly property var requests: snapshot.requests
 
   // Which run the graph is showing. 0 = newest (the live one); the arrow keys or
@@ -41,6 +40,9 @@ Panel {
   readonly property var active: requests.length > 0 ? requests[shownIndex] : null
   readonly property bool viewingNewest: shownIndex === 0
   readonly property var latest: requests.length > 0 ? requests[0] : null
+  // Each run may carry its own graph (an orchestrator run draws its plan).
+  readonly property var arch: Model.architectureFor(snapshot, active)
+  onActiveChanged: graph.requestPaint()
   readonly property var recent: requests.length > 1
     ? requests.slice(1, Math.min(requests.length, 6))
     : []
@@ -78,6 +80,7 @@ Panel {
   }
 
   function stateColor(state) {
+    if (String(state || "") === "waiting_human") return root.accent
     var key = Model.stateColorKey(state)
     if (key === "accent") return root.accent
     if (key === "urgent") return root.urgent
@@ -89,6 +92,7 @@ Panel {
     var s = String(state || "").toLowerCase()
     if (s === "done") return "DONE"
     if (s === "running") return "RUNNING"
+    if (s === "waiting_human") return "WAITING · HUMAN"
     if (s === "error") return "ERROR"
     return "IDLE"
   }

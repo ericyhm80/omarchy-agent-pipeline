@@ -77,6 +77,14 @@ function contentBounds(arch) {
 }
 
 
+// Per-request architecture wins over the global one, so a run can draw its own
+// graph (an orchestrator run draws its plan: steps as nodes, depends_on as edges).
+function architectureFor(data, request) {
+  var a = request && request.architecture
+  if (a && a.nodes && a.nodes.length) return a
+  return architecture(data)
+}
+
 function architecture(data) {
   var a = data && data.architecture
   if (!a || !a.nodes || !a.nodes.length) return DEFAULT_ARCH
