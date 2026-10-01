@@ -35,27 +35,27 @@ function parse(text) {
 var DEFAULT_ARCH = {
   width: 712, height: 236,
   nodes: [
-    { id: "input",      label: "命令输入",    labelEn: "Input",              x: 6,   y: 96,  w: 122, h: 42 },
-    { id: "router",     label: "分类 / 路由", labelEn: "Classify + Route",   x: 146, y: 96,  w: 128, h: 42 },
-    { id: "context",    label: "上下文装配",  labelEn: "Context",            x: 292, y: 12,  w: 122, h: 42 },
-    { id: "memory",     label: "记忆检索",    labelEn: "Memory",             x: 292, y: 96,  w: 122, h: 42 },
-    { id: "model",      label: "模型调用",    labelEn: "Model",              x: 292, y: 180, w: 122, h: 42 },
-    { id: "tools",      label: "工具执行",    labelEn: "Tools",              x: 432, y: 138, w: 118, h: 42 },
-    { id: "verify",     label: "校验 / 遥测", labelEn: "Verify",             x: 432, y: 54,  w: 118, h: 42 },
-    { id: "human_gate", label: "人工确认",    labelEn: "Human Gate",         x: 584, y: 180, w: 122, h: 42 },
-    { id: "output",     label: "输出完成",    labelEn: "Output",             x: 584, y: 54,  w: 122, h: 42 }
+    { id: "input",      label: "Input",            x: 6,   y: 96,  w: 122, h: 42 },
+    { id: "router",     label: "Classify + Route", x: 146, y: 96,  w: 128, h: 42 },
+    { id: "context",    label: "Context",          x: 292, y: 12,  w: 122, h: 42 },
+    { id: "memory",     label: "Memory",           x: 292, y: 96,  w: 122, h: 42 },
+    { id: "model",      label: "Model",            x: 292, y: 180, w: 122, h: 42 },
+    { id: "tools",      label: "Tools",            x: 432, y: 138, w: 118, h: 42 },
+    { id: "verify",     label: "Verify",           x: 432, y: 54,  w: 118, h: 42 },
+    { id: "human_gate", label: "Human Gate",       x: 584, y: 180, w: 122, h: 42 },
+    { id: "output",     label: "Output",           x: 584, y: 54,  w: 122, h: 42 }
   ],
   edges: [
     { from: "input", to: "router" },
-    { from: "router", to: "context", label: "上下文" },
-    { from: "router", to: "memory", label: "检索" },
+    { from: "router", to: "context", label: "context" },
+    { from: "router", to: "memory", label: "retrieve" },
     { from: "context", to: "model" },
     { from: "memory", to: "model" },
-    { from: "model", to: "tools", label: "需要工具" },
-    { from: "model", to: "verify", label: "回答" },
+    { from: "model", to: "tools", label: "needs tools" },
+    { from: "model", to: "verify", label: "answer" },
     { from: "tools", to: "verify" },
     { from: "verify", to: "output" },
-    { from: "verify", to: "human_gate", label: "需人工" }
+    { from: "verify", to: "human_gate", label: "needs human" }
   ]
 }
 

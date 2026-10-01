@@ -40,6 +40,18 @@ Panel {
 
   // Flow animation: only while a request is in flight, so an idle bar costs nothing.
   property real phase: 0
+  property double nowMs: Date.now()
+
+  // While a request is in flight the panel ticks its own clock, so the duration
+  // counts up instead of showing 0 until the run finishes.
+  function liveDurationMs() {
+    if (!root.latest) return 0
+    var done = Model.durationMs(root.latest)
+    if (done) return done
+    var started = Date.parse(String(root.latest.at || ""))
+    if (isNaN(started)) return 0
+    return Math.max(0, root.nowMs - started)
+  }
   readonly property bool animating: !!latest && String(latest.state) === "running"
   readonly property var latestIssues: Model.issues(latest)
   readonly property int problems: Model.problemCount(latest)
@@ -68,10 +80,10 @@ Panel {
 
   function stateLabel(state) {
     var s = String(state || "").toLowerCase()
-    if (s === "done") return "DONE · 完成"
-    if (s === "running") return "RUNNING · 运行中"
-    if (s === "error") return "ERROR · 失败"
-    return "IDLE · 空闲"
+    if (s === "done") return "DONE"
+    if (s === "running") return "RUNNING"
+    if (s === "error") return "ERROR"
+    return "IDLE"
   }
 
   function withAlpha(c, a) {
@@ -135,6 +147,7 @@ Panel {
     repeat: true
     onTriggered: {
       root.phase = (root.phase + 0.06) % 1.0
+      root.nowMs = Date.now()
       graph.requestPaint()
     }
   }
@@ -166,7 +179,7 @@ Panel {
           spacing: Style.space(8)
 
           Text {
-            text: "Agent Pipeline · 智能体流水线"
+            text: "Agent Pipeline"
             color: root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.subtitle
@@ -295,7 +308,7 @@ Panel {
 
               var bits = []
               var en = Model.nodeSubtitle(node)
-              if (en) bits.push(en)
+              if (en && en !== String(node.label || "")) bits.push(en)
               var detail = Model.nodeDetail(root.latest, node.id)
               if (detail) bits.push(detail)
               var ms = Model.fmtMs(Model.nodeMs(root.latest, node.id))
@@ -330,7 +343,7 @@ Panel {
         Text {
           width: parent.width
           visible: !root.latest
-          text: "暂无记录 / No requests recorded yet. Any agent runtime can append to " + root.dataPath
+          text: "No requests recorded yet. Any agent runtime can append to " + root.dataPath
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
@@ -354,10 +367,11 @@ Panel {
           text: {
             if (!root.latest) return ""
             var t = root.latest.tokens || {}
-            var bits = ["耗时/Duration " + (Model.fmtMs(Model.durationMs(root.latest)) || "0ms")]
-            if (t.input) bits.push("输入/In " + Model.fmtTokens(t.input))
-            if (t.output) bits.push("输出/Out " + Model.fmtTokens(t.output))
-            if (t.cacheRead) bits.push("缓存/Cache " + Model.fmtTokens(t.cacheRead))
+            var dur = Model.fmtMs(root.liveDurationMs()) || "0ms"
+            var bits = ["Duration " + dur + (root.animating ? "  (running)" : "")]
+            if (t.input) bits.push("In " + Model.fmtTokens(t.input))
+            if (t.output) bits.push("Out " + Model.fmtTokens(t.output))
+            if (t.cacheRead) bits.push("Cache " + Model.fmtTokens(t.cacheRead))
             var cost = Model.fmtCost(t.costUsd)
             if (cost !== "") bits.push(cost)
             if (root.latest.model) bits.push(root.latest.model)
@@ -407,7 +421,7 @@ Panel {
 
         Text {
           visible: root.recent.length > 0
-          text: "RECENT · 最近"
+          text: "RECENT"
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption

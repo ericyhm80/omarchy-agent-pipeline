@@ -28,19 +28,13 @@ The panel draws the agent's architecture as a **graph**, not a list:
 - under the graph: the request's duration, tokens (input / output / cache), cost, model, and
   every problem encountered (`issues`).
 
-That is enough to explain an agent run to someone who has never seen one: what it classified
-the request as, which model it chose, what it retrieved, which tools it ran, and what went wrong.
+While a request is still running the panel is **live**: the active node is highlighted, small
+dots flow along the edges it has traversed, the duration counts up, and the path fills in as the
+run progresses. It is a synchronized view of the run, not a post-mortem — which is what makes it
+usable for explaining an agent to someone who has never seen one: what it classified the request
+as, which model it chose, what it retrieved, which tools it ran, and what went wrong.
 
 ![pipeline graph](preview.png)
-
-## Compact, bilingual layout
-
-The canvas is sized to the graph's own bounding box (`contentBounds`), not to a fixed canvas
-area, so the panel stays tight whatever a runtime draws. Node cards carry the name in Chinese
-with `labelEn` (or the stage id) plus the runtime detail and duration underneath, and the panel
-labels are bilingual: `Agent Pipeline · 智能体流水线`, `DONE · 完成`, `均值/Duration`, `输入/In`,
-`输出/Out`, `缓存/Cache`, `RECENT · 最近`. Edge labels are skipped on short hops so they never
-sit on top of a node caption.
 
 ## How it gets data
 
@@ -56,26 +50,26 @@ $XDG_STATE_HOME/omarchy/agent-pipeline/requests.json      # usually ~/.local/sta
   "architecture": {
     "width": 720, "height": 380,
     "nodes": [
-      { "id": "input",  "label": "Owner 命令",  "x": 8,   "y": 158, "w": 116, "h": 46 },
-      { "id": "router", "label": "分类 / 路由", "x": 156, "y": 158, "w": 124, "h": 46 }
+      { "id": "input",  "label": "Input",           "x": 6,   "y": 96,  "w": 122, "h": 42 },
+      { "id": "router", "label": "Classify + Route", "x": 146, "y": 96,  "w": 128, "h": 42 }
     ],
     "edges": [ { "from": "input", "to": "router" } ]
   },
   "requests": [
     {
-      "id": "req-42", "at": "2026-10-01T15:17:00Z", "title": "memory-eval 命令注册在哪里？",
+      "id": "req-42", "at": "2026-10-01T15:17:00Z", "title": "Where is the memory-eval command registered?",
       "state": "done", "taskClass": "lookup", "route": "cheap", "model": "zai/glm-5.3-flash",
       "durationMs": 15500,
       "tokens": { "input": 352, "output": 166, "cacheRead": 4928, "costUsd": 0.00028 },
       "nodes": [
         { "id": "router",  "status": "ok",      "detail": "lookup → cheap", "ms": 239 },
-        { "id": "memory",  "status": "ok",      "detail": "1 条检索注入",    "ms": 2793 },
+        { "id": "memory",  "status": "ok",      "detail": "1 item retrieved", "ms": 2793 },
         { "id": "model",   "status": "ok",      "detail": "zai/glm-5.3-flash", "ms": 11989 },
-        { "id": "tools",   "status": "ok",      "detail": "2 次工具调用",    "ms": 0 },
-        { "id": "verify",  "status": "ok",      "detail": "用量已记录",      "ms": 1 }
+        { "id": "tools",   "status": "ok",      "detail": "2 tool calls", "ms": 0 },
+        { "id": "verify",  "status": "ok",      "detail": "telemetry recorded", "ms": 1 }
       ],
       "edges": [ { "from": "input", "to": "router" }, { "from": "router", "to": "memory" } ],
-      "issues": [ { "level": "warn", "node": "model", "detail": "codex 达限额，降级到 GLM" } ]
+      "issues": [ { "level": "warn", "node": "model", "detail": "codex hit its limit, fell back to GLM" } ]
     }
   ]
 }
@@ -94,12 +88,12 @@ never fails loudly, so instrumentation cannot break the agent it observes:
 # optional: describe your own architecture once (omit to use the shipped pipeline)
 agent-pipeline architecture --file my-graph.json
 
-agent-pipeline start --id "$REQ" --title "memory-eval 命令注册在哪里？" --agent entrepreneur-agent
+agent-pipeline start --id "$REQ" --title "Where is the memory-eval command registered?" --agent entrepreneur-agent
 agent-pipeline node  --id "$REQ" --node router --status ok --detail "lookup → cheap"     --ms 239
-agent-pipeline node  --id "$REQ" --node memory --status ok --detail "1 条检索注入"        --ms 2793
+agent-pipeline node  --id "$REQ" --node memory --status ok --detail "1 item retrieved"      --ms 2793
 agent-pipeline node  --id "$REQ" --node model  --status ok --detail "zai/glm-5.3-flash"  --ms 11989
-agent-pipeline node  --id "$REQ" --node tools  --status ok --detail "2 次工具调用"        --ms 0
-agent-pipeline issue --id "$REQ" --level warn --node model --detail "codex 达限额，降级到 GLM"
+agent-pipeline node  --id "$REQ" --node tools  --status ok --detail "2 tool calls"          --ms 0
+agent-pipeline issue --id "$REQ" --level warn --node model --detail "codex hit its limit, fell back to GLM"
 agent-pipeline end   --id "$REQ" --state done --duration-ms 15500 \
   --tokens-json '{"input":352,"output":166,"cacheRead":4928,"costUsd":0.00028}'
 ```
