@@ -80,6 +80,7 @@ $XDG_STATE_HOME/omarchy/agent-pipeline/requests.json      # usually ~/.local/sta
 Omit `architecture` and the widget falls back to the pipeline it ships with, so a runtime only
 has to write `requests`. `status` accepts `ok`, `running`, `warn`, `error`, `skipped`;
 `state` accepts `running`, `done`, `error`; `issues[].level` accepts `info`, `warn`, `error`.
+The widget keeps the newest 30 requests and shows the newest by default.
 
 ## Recording a request
 
@@ -104,6 +105,30 @@ Recording a node also marks the edge that feeds it as traversed, so edges never 
 listed by hand. `step --name ...` still works and renders as a plain list for runtimes that do
 not describe a graph. Other subcommands: `emit --json '<object>'` (whole request at once),
 `clear`, `demo` (sample graph + request).
+
+## Inspecting earlier runs
+
+The panel opens on the newest run and stays live while one is in flight. To look at an earlier
+one, press **↑/↓** or click a row under RECENT: the graph and the summary switch to that run, the
+header shows `viewing 3/7`, and clicking the same row again (or pressing ↑ back to the top)
+returns to the newest. The newest run keeps recording while you inspect, so nothing is lost.
+
+## Who reports
+
+Anything can report: a host that runs agents (a console, a CI job, a script) simply writes the JSON
+above, and the widget shows it — that is how the web console and this repo's own `agent-pipeline`
+CLI work. Two small conventions keep the picture clean:
+
+- **Instrumentation must never break the agent it observes.** The bundled writer swallows its own
+  failures, and the example extension wraps every emit in try/catch.
+- **One reporter per run.** If a host already reports its own runs and *also* spawns pi (or any
+  tool) that has its own global reporter, the host should set `AGENT_PIPELINE_SELF=off` for those
+  child processes; the example extension stands down when it sees that variable, so a run is never
+  reported twice (and the host's richer report is the one that survives).
+
+`examples/pi-extension/agent-pipeline.ts` is a working reporter for the **pi** coding agent: drop it
+in `~/.pi/agent/extensions/` and every pi session — terminal and headless — appears in the widget,
+with the prompt as the title, per-tool updates, and real token usage at the end.
 
 ## Interaction
 

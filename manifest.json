@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "id": "io.github.ericyhm80.agent-pipeline",
   "name": "Agent Pipeline",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": "haomin.ye (ericyhm80)",
   "license": "MIT",
   "repository": "https://github.com/ericyhm80/omarchy-agent-pipeline",
-  "description": "Watch what an AI agent actually does: a live graph of its pipeline — nodes, information flow, per-node state, tokens, duration and problems. English UI.",
+  "description": "Watch what an AI agent actually does: a live graph of its pipeline — nodes, information flow, per-node state, tokens, duration and problems, plus click-through history.",
   "kinds": [
     "bar-widget"
   ],

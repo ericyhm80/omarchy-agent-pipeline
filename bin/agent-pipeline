@@ -150,6 +150,10 @@ def main() -> int:
     n.add_argument("--ms", type=float, default=0.0)
     n.add_argument("--tokens-json", dest="tokens_json", default=None)
 
+    pt = sub.add_parser("patch", help="merge a JSON patch into one request (single process)")
+    pt.add_argument("json")
+    pt.add_argument("--file", default=None, help="read the patch JSON from a file instead")
+
     i = sub.add_parser("issue", help="record a problem encountered during a request")
     i.add_argument("--id", required=True)
     i.add_argument("--level", default="warn", choices=["warn", "error", "info"])
@@ -281,6 +285,57 @@ def main() -> int:
                         row["edges"].append(pair)
             if args.status in ("error", "failed"):
                 row["state"] = "error"
+            save(data)
+            return 0
+        return with_lock(op)
+
+    if args.cmd == "patch":
+        def op() -> int:
+            raw = args.json
+            if args.file:
+                try:
+                    raw = Path(args.file).read_text(encoding="utf-8")
+                except OSError:
+                    return 1
+            try:
+                patch = json.loads(raw)
+            except json.JSONDecodeError:
+                return 1
+            data = load()
+            rid = str(patch.get("id") or "")
+            if not rid:
+                return 1
+            row = find(data, rid)
+            if row is None:
+                row = {"id": rid, "at": now(), "title": "", "agent": "", "state": "running",
+                       "taskClass": "", "route": "", "model": "",
+                       "tokens": {"input": 0, "output": 0, "cacheRead": 0, "costUsd": 0.0},
+                       "nodes": [], "edges": [], "issues": []}
+                data["requests"].append(row)
+            for key in ("title", "agent", "state", "taskClass", "route", "model", "summary"):
+                if patch.get(key) is not None:
+                    row[key] = patch[key]
+            if patch.get("durationMs") is not None:
+                row["durationMs"] = round(float(patch["durationMs"]), 1)
+            if isinstance(patch.get("tokens"), dict):
+                row["tokens"] = patch["tokens"]
+            row.setdefault("nodes", [])
+            for node in patch.get("nodes") or []:
+                if not node.get("id"):
+                    continue
+                row["nodes"] = [n for n in row["nodes"] if n.get("id") != node["id"]]
+                row["nodes"].append(node)
+                for edge in (data.get("architecture") or {}).get("edges", []):
+                    if edge.get("to") == node["id"]:
+                        pair = {"from": edge["from"], "to": edge["to"]}
+                        if pair not in row.setdefault("edges", []):
+                            row["edges"].append(pair)
+                if node.get("status") in ("error", "failed"):
+                    row["state"] = "error"
+            for issue in patch.get("issues") or []:
+                row.setdefault("issues", []).append(issue)
+            if patch.get("archReset"):
+                data["architecture"] = DEFAULT_ARCHITECTURE
             save(data)
             return 0
         return with_lock(op)

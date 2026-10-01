@@ -33,6 +33,13 @@ Panel {
   property var snapshot: Model.parse("")
   readonly property var arch: Model.architecture(snapshot)
   readonly property var requests: snapshot.requests
+
+  // Which run the graph is showing. 0 = newest (the live one); the arrow keys or
+  // a click on a row in RECENT inspect an earlier run without losing the live view.
+  property int selectedIndex: 0
+  readonly property int shownIndex: requests.length === 0 ? 0 : Math.min(selectedIndex, requests.length - 1)
+  readonly property var active: requests.length > 0 ? requests[shownIndex] : null
+  readonly property bool viewingNewest: shownIndex === 0
   readonly property var latest: requests.length > 0 ? requests[0] : null
   readonly property var recent: requests.length > 1
     ? requests.slice(1, Math.min(requests.length, 6))
@@ -45,16 +52,16 @@ Panel {
   // While a request is in flight the panel ticks its own clock, so the duration
   // counts up instead of showing 0 until the run finishes.
   function liveDurationMs() {
-    if (!root.latest) return 0
-    var done = Model.durationMs(root.latest)
+    if (!root.active) return 0
+    var done = Model.durationMs(root.active)
     if (done) return done
-    var started = Date.parse(String(root.latest.at || ""))
+    var started = Date.parse(String(root.active.at || ""))
     if (isNaN(started)) return 0
     return Math.max(0, root.nowMs - started)
   }
-  readonly property bool animating: !!latest && String(latest.state) === "running"
-  readonly property var latestIssues: Model.issues(latest)
-  readonly property int problems: Model.problemCount(latest)
+  readonly property bool animating: !!active && String(active.state) === "running"
+  readonly property var activeIssues: Model.issues(active)
+  readonly property int problems: Model.problemCount(active)
 
   function refresh() {
     dataView.reload()
@@ -167,6 +174,10 @@ Panel {
       id: keyCatcher
       anchors.fill: parent
       onCloseRequested: root.close()
+      onMoveRequested: function(dx, dy) {
+        if (dy === 0 || root.requests.length === 0) return
+        root.selectedIndex = Math.max(0, Math.min(root.requests.length - 1, root.shownIndex + (dy > 0 ? 1 : -1)))
+      }
 
       Column {
         id: column
@@ -194,6 +205,23 @@ Panel {
             font.pixelSize: Style.font.caption
           }
 
+          Text {
+            visible: root.requests.length > 1 && !root.viewingNewest
+            text: "· viewing " + (root.shownIndex + 1) + "/" + root.requests.length
+            color: root.accent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+          }
+
+          Text {
+            visible: root.viewingNewest && !!root.latest && String(root.latest.state) === "running"
+            text: "· LIVE"
+            color: root.accent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+          }
+
           Item { width: Math.max(0, parent.width - x - stateBadge.width); height: 1 }
 
           Rectangle {
@@ -201,15 +229,15 @@ Panel {
             width: badgeLabel.implicitWidth + Style.space(12)
             height: badgeLabel.implicitHeight + Style.space(4)
             radius: height / 2
-            color: root.withAlpha(root.stateColor(latest ? latest.state : "idle"), 0.18)
+            color: root.withAlpha(root.stateColor(active ? active.state : "idle"), 0.18)
             border.width: 1
-            border.color: root.stateColor(latest ? latest.state : "idle")
+            border.color: root.stateColor(active ? active.state : "idle")
 
             Text {
               id: badgeLabel
               anchors.centerIn: parent
-              text: root.stateLabel(latest ? latest.state : "idle")
-              color: root.stateColor(latest ? latest.state : "idle")
+              text: root.stateLabel(active ? active.state : "idle")
+              color: root.stateColor(active ? active.state : "idle")
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               font.bold: true
@@ -247,7 +275,7 @@ Panel {
               var x1 = a.x + a.w, y1 = a.y + a.h / 2
               var x2 = c.x, y2 = c.y + c.h / 2
               var mid = (x1 + x2) / 2
-              var live = Model.edgeTraversed(root.latest, e.from, e.to)
+              var live = Model.edgeTraversed(root.active, e.from, e.to)
 
               ctx.strokeStyle = live ? root.withAlpha(root.accent, 0.9) : root.withAlpha(root.foreground, 0.14)
               ctx.lineWidth = live ? 1.6 : 1
@@ -282,7 +310,7 @@ Panel {
             var nodes = arch.nodes || []
             for (var n = 0; n < nodes.length; n++) {
               var node = nodes[n]
-              var status = Model.nodeStatus(root.latest, node.id)
+              var status = Model.nodeStatus(root.active, node.id)
               var color = nodeColor(status)
               var r = 7
 
@@ -309,9 +337,9 @@ Panel {
               var bits = []
               var en = Model.nodeSubtitle(node)
               if (en && en !== String(node.label || "")) bits.push(en)
-              var detail = Model.nodeDetail(root.latest, node.id)
+              var detail = Model.nodeDetail(root.active, node.id)
               if (detail) bits.push(detail)
-              var ms = Model.fmtMs(Model.nodeMs(root.latest, node.id))
+              var ms = Model.fmtMs(Model.nodeMs(root.active, node.id))
               if (ms) bits.push(ms)
               var sub = bits.join(" · ")
               if (sub !== "") {
@@ -336,13 +364,13 @@ Panel {
         Rectangle {
           width: parent.width
           height: 1
-          visible: !!root.latest
+          visible: !!root.active
           color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.12)
         }
 
         Text {
           width: parent.width
-          visible: !root.latest
+          visible: root.requests.length === 0
           text: "No requests recorded yet. Any agent runtime can append to " + root.dataPath
           color: root.dim
           font.family: root.fontFamily
@@ -352,8 +380,8 @@ Panel {
 
         Text {
           width: parent.width
-          visible: !!root.latest
-          text: root.latest ? (root.latest.title || "(untitled request)") : ""
+          visible: !!root.active
+          text: root.active ? (root.active.title || "(untitled request)") : ""
           color: root.foreground
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
@@ -363,10 +391,10 @@ Panel {
 
         Text {
           width: parent.width
-          visible: !!root.latest
+          visible: !!root.active
           text: {
-            if (!root.latest) return ""
-            var t = root.latest.tokens || {}
+            if (!root.active) return ""
+            var t = root.active.tokens || {}
             var dur = Model.fmtMs(root.liveDurationMs()) || "0ms"
             var bits = ["Duration " + dur + (root.animating ? "  (running)" : "")]
             if (t.input) bits.push("In " + Model.fmtTokens(t.input))
@@ -374,7 +402,7 @@ Panel {
             if (t.cacheRead) bits.push("Cache " + Model.fmtTokens(t.cacheRead))
             var cost = Model.fmtCost(t.costUsd)
             if (cost !== "") bits.push(cost)
-            if (root.latest.model) bits.push(root.latest.model)
+            if (root.active.model) bits.push(root.active.model)
             return bits.join("  ·  ")
           }
           color: root.dim
@@ -385,7 +413,7 @@ Panel {
 
         // --------------------------------------------------------- problems
         Repeater {
-          model: root.latestIssues
+          model: root.activeIssues
 
           Row {
             required property var modelData
@@ -431,10 +459,26 @@ Panel {
         Repeater {
           model: root.recent
 
-          Row {
+          Rectangle {
             required property var modelData
+            required property int index
             width: column.width
-            spacing: Style.space(8)
+            height: recentRow.implicitHeight + Style.space(4)
+            radius: 6
+            color: (root.shownIndex === index + 1)
+              ? Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.14)
+              : "transparent"
+
+            MouseArea {
+              anchors.fill: parent
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.selectedIndex = (root.shownIndex === index + 1) ? 0 : index + 1
+            }
+
+            Row {
+              id: recentRow
+              width: parent.width
+              spacing: Style.space(8)
 
             Text {
               text: "●"
@@ -476,7 +520,20 @@ Panel {
               font.pixelSize: Style.font.caption
               width: Style.space(20)
             }
+            }
           }
+        }
+
+        Text {
+          width: parent.width
+          visible: root.requests.length > 1
+          text: root.viewingNewest
+            ? "Newest run · ↑↓ or click a row to inspect an earlier one"
+            : "Inspecting run " + (root.shownIndex + 1) + " of " + root.requests.length + " · ↑↓ to move, click it again for the newest"
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
         }
       }
     }
