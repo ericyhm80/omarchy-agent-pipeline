@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "id": "io.github.ericyhm80.agent-pipeline",
   "name": "Agent Pipeline",
-  "version": "1.0.0",
+  "version": "0.2.0",
   "author": "haomin.ye (ericyhm80)",
   "license": "MIT",
   "repository": "https://github.com/ericyhm80/omarchy-agent-pipeline",
-  "description": "See what an AI agent is actually doing: task classification, model route, memory retrieval, tool calls and verification, one pipeline per request.",
+  "description": "See what an AI agent is actually doing: its architecture as a live graph — nodes for each stage, edges for how information travels, per-node state, tokens, duration and problems.",
   "kinds": [
     "bar-widget"
   ],
@@ -15,7 +15,7 @@
   },
   "barWidget": {
     "displayName": "Agent Pipeline",
-    "description": "Per-request agent pipeline (classify, route, retrieve, act, verify) with tokens and cost",
+    "description": "Per-request agent workflow graph: classification, routing, context, retrieval, model, tools, verification, human gate — with tokens, duration and issues",
     "category": "AI",
     "allowMultiple": false,
     "defaultSection": "center"

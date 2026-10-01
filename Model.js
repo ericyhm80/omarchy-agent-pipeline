@@ -30,6 +30,100 @@ function parse(text) {
   return { updatedAt: String(data.updatedAt || ""), requests: rows, invalid: false }
 }
 
+// Shipped default graph, mirroring the writer's default so the widget renders
+// something meaningful before any runtime defines its own architecture.
+var DEFAULT_ARCH = {
+  width: 720, height: 380,
+  nodes: [
+    { id: "input",      label: "Owner 命令",  x: 8,   y: 158, w: 116, h: 46 },
+    { id: "router",     label: "分类 / 路由", x: 156, y: 158, w: 124, h: 46 },
+    { id: "context",    label: "上下文装配",  x: 312, y: 58,  w: 124, h: 46 },
+    { id: "memory",     label: "记忆检索",    x: 312, y: 158, w: 124, h: 46 },
+    { id: "model",      label: "模型调用",    x: 312, y: 258, w: 124, h: 46 },
+    { id: "tools",      label: "工具执行",    x: 468, y: 208, w: 116, h: 46 },
+    { id: "verify",     label: "校验 / 遥测", x: 468, y: 108, w: 116, h: 46 },
+    { id: "human_gate", label: "Human Gate",  x: 620, y: 208, w: 92,  h: 46 },
+    { id: "output",     label: "输出完成",    x: 612, y: 58,  w: 100, h: 46 }
+  ],
+  edges: [
+    { from: "input", to: "router" },
+    { from: "router", to: "context", label: "上下文" },
+    { from: "router", to: "memory", label: "检索" },
+    { from: "context", to: "model" },
+    { from: "memory", to: "model" },
+    { from: "model", to: "tools", label: "需要工具" },
+    { from: "model", to: "verify", label: "回答" },
+    { from: "tools", to: "verify" },
+    { from: "verify", to: "output" },
+    { from: "verify", to: "human_gate", label: "需人工" }
+  ]
+}
+
+function architecture(data) {
+  var a = data && data.architecture
+  if (!a || !a.nodes || !a.nodes.length) return DEFAULT_ARCH
+  return a
+}
+
+function nodeById(arch, id) {
+  var nodes = (arch && arch.nodes) || []
+  for (var i = 0; i < nodes.length; i++)
+    if (String(nodes[i].id) === String(id)) return nodes[i]
+  return null
+}
+
+// Node state for a request: { status, detail, ms } or null when untouched.
+function nodeState(request, id) {
+  var rows = (request && request.nodes) || []
+  for (var i = 0; i < rows.length; i++)
+    if (String(rows[i].id) === String(id)) return rows[i]
+  return null
+}
+
+function nodeStatus(request, id) {
+  var row = nodeState(request, id)
+  return row ? String(row.status || "") : ""
+}
+
+function nodeDetail(request, id) {
+  var row = nodeState(request, id)
+  return row ? String(row.detail || "") : ""
+}
+
+function nodeMs(request, id) {
+  var row = nodeState(request, id)
+  return row ? Number(row.ms || 0) : 0
+}
+
+function edgeTraversed(request, from, to) {
+  var edges = (request && request.edges) || []
+  for (var i = 0; i < edges.length; i++)
+    if (String(edges[i].from) === String(from) && String(edges[i].to) === String(to)) return true
+  return false
+}
+
+function durationMs(request) {
+  if (!request) return 0
+  if (request.durationMs) return Number(request.durationMs)
+  if (request.steps) return totalMs(request)
+  var rows = request.nodes || []
+  var sum = 0
+  for (var i = 0; i < rows.length; i++) sum += Number(rows[i].ms || 0)
+  return sum
+}
+
+function issues(request) {
+  return (request && request.issues) || []
+}
+
+function problemCount(request) {
+  var rows = issues(request)
+  var n = 0
+  for (var i = 0; i < rows.length; i++)
+    if (String(rows[i].level || "") !== "info") n++
+  return n
+}
+
 function stateColorKey(state) {
   var s = String(state || "").toLowerCase()
   if (s === "running") return "accent"

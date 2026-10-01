@@ -14,9 +14,28 @@ It exists for two audiences:
 
 ![pipeline panel](preview.png)
 
+## What it shows
+
+The panel draws the agent's architecture as a **graph**, not a list:
+
+- **nodes** are the stages (input, routing, context assembly, memory retrieval, model call,
+  tools, verification, human gate, output) positioned by the data itself;
+- **edges** are how information travels, with labels;
+- the path a request **actually took** is highlighted, and while it is still running small
+  dots flow along those edges;
+- each node carries its own state (`ok` / `running` / `warn` / `error` / `skipped`), a short
+  detail and its own duration;
+- under the graph: the request's duration, tokens (input / output / cache), cost, model, and
+  every problem encountered (`issues`).
+
+That is enough to explain an agent run to someone who has never seen one: what it classified
+the request as, which model it chose, what it retrieved, which tools it ran, and what went wrong.
+
+![pipeline graph](preview.png)
+
 ## How it gets data
 
-The plugin never calls a model and never talks to the network. It reads one file:
+The plugin is passive: it watches one documented local file and makes no network requests.
 
 ```
 $XDG_STATE_HOME/omarchy/agent-pipeline/requests.json      # usually ~/.local/state/...
@@ -24,50 +43,62 @@ $XDG_STATE_HOME/omarchy/agent-pipeline/requests.json      # usually ~/.local/sta
 
 ```json
 {
-  "updatedAt": "2026-10-01T12:31:04Z",
+  "updatedAt": "2026-10-01T15:17:00Z",
+  "architecture": {
+    "width": 720, "height": 380,
+    "nodes": [
+      { "id": "input",  "label": "Owner 命令",  "x": 8,   "y": 158, "w": 116, "h": 46 },
+      { "id": "router", "label": "分类 / 路由", "x": 156, "y": 158, "w": 124, "h": 46 }
+    ],
+    "edges": [ { "from": "input", "to": "router" } ]
+  },
   "requests": [
     {
-      "id": "req-42",
-      "at": "2026-10-01T12:31:04Z",
-      "title": "定价策略评审",
-      "agent": "entrepreneur-agent",
-      "state": "done",
-      "taskClass": "strategy",
-      "route": "strong",
-      "model": "zai/glm-5.3-highspeed",
-      "tokens": { "input": 1240, "output": 96, "cacheRead": 4180, "costUsd": 0.0023 },
-      "steps": [
-        { "name": "classify", "status": "ok", "detail": "strategy (rules)", "ms": 2 },
-        { "name": "route",    "status": "ok", "detail": "strong → glm-5.3-highspeed", "ms": 1 },
-        { "name": "memory",   "status": "ok", "detail": "5 items retrieved", "ms": 130 },
-        { "name": "model",    "status": "ok", "detail": "glm-5.3-highspeed", "ms": 8100 },
-        { "name": "verify",   "status": "ok", "detail": "telemetry recorded", "ms": 3 }
-      ]
+      "id": "req-42", "at": "2026-10-01T15:17:00Z", "title": "memory-eval 命令注册在哪里？",
+      "state": "done", "taskClass": "lookup", "route": "cheap", "model": "zai/glm-5.3-flash",
+      "durationMs": 15500,
+      "tokens": { "input": 352, "output": 166, "cacheRead": 4928, "costUsd": 0.00028 },
+      "nodes": [
+        { "id": "router",  "status": "ok",      "detail": "lookup → cheap", "ms": 239 },
+        { "id": "memory",  "status": "ok",      "detail": "1 条检索注入",    "ms": 2793 },
+        { "id": "model",   "status": "ok",      "detail": "zai/glm-5.3-flash", "ms": 11989 },
+        { "id": "tools",   "status": "ok",      "detail": "2 次工具调用",    "ms": 0 },
+        { "id": "verify",  "status": "ok",      "detail": "用量已记录",      "ms": 1 }
+      ],
+      "edges": [ { "from": "input", "to": "router" }, { "from": "router", "to": "memory" } ],
+      "issues": [ { "level": "warn", "node": "model", "detail": "codex 达限额，降级到 GLM" } ]
     }
   ]
 }
 ```
 
-`steps[].status` accepts `ok`, `warn`, `error`, `running`, `skipped`.
-`state` accepts `running`, `done`, `error`. Everything else is free text.
+Omit `architecture` and the widget falls back to the pipeline it ships with, so a runtime only
+has to write `requests`. `status` accepts `ok`, `running`, `warn`, `error`, `skipped`;
+`state` accepts `running`, `done`, `error`; `issues[].level` accepts `info`, `warn`, `error`.
 
 ## Recording a request
 
-The bundled writer keeps the file tidy (atomic writes, a lock, most recent 30
-requests) and never fails loudly, so instrumentation cannot break the agent it
-observes:
+The bundled writer keeps the file tidy (atomic writes, a lock, most recent 30 requests) and
+never fails loudly, so instrumentation cannot break the agent it observes:
 
 ```bash
-agent-pipeline start --id "$REQ" --title "定价策略评审" --agent entrepreneur-agent
-agent-pipeline step  --id "$REQ" --name classify --status ok --detail "strategy (rules)" --ms 2
-agent-pipeline step  --id "$REQ" --name memory   --status ok --detail "5 items retrieved" --ms 130
-agent-pipeline step  --id "$REQ" --name model    --status ok --detail "glm-5.3-highspeed" --ms 8100
-agent-pipeline end   --id "$REQ" --state done \
-  --tokens-json '{"input":1240,"output":96,"cacheRead":4180,"costUsd":0.0023}'
+# optional: describe your own architecture once (omit to use the shipped pipeline)
+agent-pipeline architecture --file my-graph.json
+
+agent-pipeline start --id "$REQ" --title "memory-eval 命令注册在哪里？" --agent entrepreneur-agent
+agent-pipeline node  --id "$REQ" --node router --status ok --detail "lookup → cheap"     --ms 239
+agent-pipeline node  --id "$REQ" --node memory --status ok --detail "1 条检索注入"        --ms 2793
+agent-pipeline node  --id "$REQ" --node model  --status ok --detail "zai/glm-5.3-flash"  --ms 11989
+agent-pipeline node  --id "$REQ" --node tools  --status ok --detail "2 次工具调用"        --ms 0
+agent-pipeline issue --id "$REQ" --level warn --node model --detail "codex 达限额，降级到 GLM"
+agent-pipeline end   --id "$REQ" --state done --duration-ms 15500 \
+  --tokens-json '{"input":352,"output":166,"cacheRead":4928,"costUsd":0.00028}'
 ```
 
-Other subcommands: `emit --json '<object>'` (complete request in one call),
-`clear`, `demo` (write a sample pipeline for a first look).
+Recording a node also marks the edge that feeds it as traversed, so edges never have to be
+listed by hand. `step --name ...` still works and renders as a plain list for runtimes that do
+not describe a graph. Other subcommands: `emit --json '<object>'` (whole request at once),
+`clear`, `demo` (sample graph + request).
 
 ## Interaction
 
@@ -81,12 +112,6 @@ Other subcommands: `emit --json '<object>'` (complete request in one call),
 
 The bar glyph turns accent-coloured while a request is running, and urgent when
 the newest request errored or a step reported a warning.
-
-## Requirements
-
-- Omarchy with the Quickshell-based shell (the widget itself needs nothing else).
-- `python3` — only for the **optional** `agent-pipeline` writer CLI. Write the JSON file
-  yourself, from any language, and the widget still works. No other dependencies, no network access.
 
 ## Install
 

@@ -30,6 +30,36 @@ STATE_HOME = Path(os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / 
 STORE = STATE_HOME / "omarchy" / "agent-pipeline" / "requests.json"
 MAX_REQUESTS = 30
 
+# Shipped default architecture: the pipeline this widget was built around. Data
+# can override it entirely, so the widget stays useful for other runtimes.
+DEFAULT_ARCHITECTURE = {
+    "width": 720,
+    "height": 380,
+    "nodes": [
+        {"id": "input",      "label": "Owner 命令",   "x": 8,   "y": 158, "w": 116, "h": 46},
+        {"id": "router",     "label": "分类 / 路由",  "x": 156, "y": 158, "w": 124, "h": 46},
+        {"id": "context",    "label": "上下文装配",   "x": 312, "y": 58,  "w": 124, "h": 46},
+        {"id": "memory",     "label": "记忆检索",     "x": 312, "y": 158, "w": 124, "h": 46},
+        {"id": "model",      "label": "模型调用",     "x": 312, "y": 258, "w": 124, "h": 46},
+        {"id": "tools",      "label": "工具执行",     "x": 468, "y": 208, "w": 116, "h": 46},
+        {"id": "verify",     "label": "校验 / 遥测",  "x": 468, "y": 108, "w": 116, "h": 46},
+        {"id": "human_gate", "label": "Human Gate",  "x": 620, "y": 208, "w": 92,  "h": 46},
+        {"id": "output",     "label": "输出完成",     "x": 612, "y": 58,  "w": 100, "h": 46},
+    ],
+    "edges": [
+        {"from": "input", "to": "router"},
+        {"from": "router", "to": "context", "label": "上下文"},
+        {"from": "router", "to": "memory", "label": "检索"},
+        {"from": "context", "to": "model"},
+        {"from": "memory", "to": "model"},
+        {"from": "model", "to": "tools", "label": "需要工具"},
+        {"from": "model", "to": "verify", "label": "回答"},
+        {"from": "tools", "to": "verify"},
+        {"from": "verify", "to": "output"},
+        {"from": "verify", "to": "human_gate", "label": "需人工"},
+    ],
+}
+
 
 def now() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
@@ -37,14 +67,15 @@ def now() -> str:
 
 def load() -> dict:
     if not STORE.exists():
-        return {"updatedAt": now(), "requests": []}
+        return {"updatedAt": now(), "requests": [], "architecture": DEFAULT_ARCHITECTURE}
     try:
         data = json.loads(STORE.read_text(encoding="utf-8"))
         if not isinstance(data, dict) or not isinstance(data.get("requests"), list):
             raise ValueError("bad shape")
+        data.setdefault("architecture", DEFAULT_ARCHITECTURE)
         return data
     except (json.JSONDecodeError, OSError, ValueError):
-        return {"updatedAt": now(), "requests": []}
+        return {"updatedAt": now(), "requests": [], "architecture": DEFAULT_ARCHITECTURE}
 
 
 def save(data: dict) -> None:
@@ -100,9 +131,29 @@ def main() -> int:
     e.add_argument("--model", default=None)
     e.add_argument("--route", default=None)
     e.add_argument("--task-class", dest="task_class", default=None)
+    e.add_argument("--duration-ms", dest="duration_ms", type=float, default=None)
+    e.add_argument("--summary", default=None)
 
     em = sub.add_parser("emit", help="append a complete request object (JSON)")
     em.add_argument("json")
+
+    a = sub.add_parser("architecture", help="set the workflow graph (nodes + edges)")
+    a.add_argument("--json", default=None, help="graph JSON; omit to reset to the shipped default")
+    a.add_argument("--file", default=None, help="read graph JSON from a file")
+
+    n = sub.add_parser("node", help="record one workflow node's state for a request")
+    n.add_argument("--id", required=True)
+    n.add_argument("--node", required=True)
+    n.add_argument("--status", default="ok")
+    n.add_argument("--detail", default="")
+    n.add_argument("--ms", type=float, default=0.0)
+    n.add_argument("--tokens-json", dest="tokens_json", default=None)
+
+    i = sub.add_parser("issue", help="record a problem encountered during a request")
+    i.add_argument("--id", required=True)
+    i.add_argument("--level", default="warn", choices=["warn", "error", "info"])
+    i.add_argument("--node", default="")
+    i.add_argument("--detail", required=True)
 
     sub.add_parser("clear", help="remove all recorded requests")
     sub.add_parser("demo", help="write one sample pipeline for a first look")
@@ -159,6 +210,10 @@ def main() -> int:
                 row["route"] = args.route
             if args.task_class:
                 row["taskClass"] = args.task_class
+            if args.duration_ms is not None:
+                row["durationMs"] = round(args.duration_ms, 1)
+            if args.summary:
+                row["summary"] = args.summary
             save(data)
             return 0
         return with_lock(op)
@@ -176,6 +231,72 @@ def main() -> int:
             return 0
         return with_lock(op)
 
+    if args.cmd == "architecture":
+        def op() -> int:
+            data = load()
+            if args.file:
+                try:
+                    data["architecture"] = json.loads(Path(args.file).read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    return 1
+            elif args.json:
+                try:
+                    data["architecture"] = json.loads(args.json)
+                except json.JSONDecodeError:
+                    return 1
+            else:
+                data["architecture"] = DEFAULT_ARCHITECTURE
+            save(data)
+            return 0
+        return with_lock(op)
+
+    if args.cmd == "node":
+        def op() -> int:
+            data = load()
+            row = find(data, args.id)
+            if row is None:
+                row = {"id": args.id, "at": now(), "title": "", "agent": "", "state": "running",
+                       "taskClass": "", "route": "", "model": "",
+                       "tokens": {"input": 0, "output": 0, "cacheRead": 0, "costUsd": 0.0},
+                       "nodes": [], "edges": [], "issues": []}
+                data["requests"].append(row)
+            row.setdefault("nodes", [])
+            tokens = None
+            if args.tokens_json:
+                try:
+                    tokens = json.loads(args.tokens_json)
+                except json.JSONDecodeError:
+                    tokens = None
+            row["nodes"] = [n for n in row["nodes"] if n.get("id") != args.node]
+            entry = {"id": args.node, "status": args.status, "detail": args.detail, "ms": round(args.ms, 1)}
+            if tokens:
+                entry["tokens"] = tokens
+            row["nodes"].append(entry)
+            # every recorded node implies the edge that fed it was traversed
+            for edge in (data.get("architecture") or {}).get("edges", []):
+                if edge.get("to") == args.node:
+                    pair = {"from": edge["from"], "to": edge["to"]}
+                    if pair not in row.setdefault("edges", []):
+                        row["edges"].append(pair)
+            if args.status in ("error", "failed"):
+                row["state"] = "error"
+            save(data)
+            return 0
+        return with_lock(op)
+
+    if args.cmd == "issue":
+        def op() -> int:
+            data = load()
+            row = find(data, args.id)
+            if row is None:
+                return 0
+            row.setdefault("issues", []).append({
+                "level": args.level, "node": args.node, "detail": args.detail, "at": now(),
+            })
+            save(data)
+            return 0
+        return with_lock(op)
+
     if args.cmd == "clear":
         def op() -> int:
             save({"updatedAt": now(), "requests": []})
@@ -185,19 +306,34 @@ def main() -> int:
     if args.cmd == "demo":
         def op() -> int:
             data = load()
+            data["architecture"] = DEFAULT_ARCHITECTURE
             data["requests"].append({
                 "id": "demo-" + dt.datetime.now().strftime("%H%M%S"),
                 "at": now(), "title": "定价策略评审", "agent": "entrepreneur-agent",
                 "state": "done", "taskClass": "strategy", "route": "strong",
                 "model": "zai/glm-5.3-highspeed",
                 "tokens": {"input": 1240, "output": 96, "cacheRead": 4180, "costUsd": 0.0023},
-                "steps": [
-                    {"name": "classify", "status": "ok", "detail": "strategy (rules)", "ms": 2},
-                    {"name": "route", "status": "ok", "detail": "strong → glm-5.3-highspeed", "ms": 1},
-                    {"name": "memory", "status": "ok", "detail": "5 条本地检索注入", "ms": 130},
-                    {"name": "model", "status": "ok", "detail": "glm-5.3-highspeed", "ms": 8100},
-                    {"name": "verify", "status": "ok", "detail": "遥测已记录", "ms": 3},
+                "durationMs": 8260.0,
+                "nodes": [
+                    {"id": "input", "status": "ok", "detail": "1 条命令", "ms": 0},
+                    {"id": "router", "status": "ok", "detail": "strategy → strong", "ms": 3},
+                    {"id": "context", "status": "ok", "detail": "共享上下文 1.8k 字符", "ms": 4},
+                    {"id": "memory", "status": "ok", "detail": "5 条检索注入", "ms": 130},
+                    {"id": "model", "status": "ok", "detail": "glm-5.3-highspeed", "ms": 8100},
+                    {"id": "tools", "status": "skipped", "detail": "无需工具", "ms": 0},
+                    {"id": "verify", "status": "ok", "detail": "遥测已记录", "ms": 3},
+                    {"id": "output", "status": "ok", "detail": "已返回", "ms": 0},
                 ],
+                "edges": [
+                    {"from": "input", "to": "router"}, {"from": "router", "to": "context"},
+                    {"from": "router", "to": "memory"}, {"from": "context", "to": "model"},
+                    {"from": "memory", "to": "model"}, {"from": "model", "to": "verify"},
+                    {"from": "verify", "to": "output"},
+                ],
+                "issues": [
+                    {"level": "warn", "node": "model", "detail": "codex 达限额，自动降级到 GLM"},
+                ],
+                "summary": "定价策略评审完成",
             })
             save(data)
             return 0
