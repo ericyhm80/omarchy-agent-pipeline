@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""agent-pipeline — record what an AI agent did, for the Omarchy bar widget.
+
+Storage: $XDG_STATE_HOME/omarchy/agent-pipeline/requests.json
+  {"updatedAt": ISO, "requests": [ {id, at, title, agent, state, taskClass,
+   route, model, tokens{input,output,cacheRead,costUsd}, steps[{name,status,detail,ms}]} ]}
+Newest request last; the file is rewritten atomically and capped, so the bar
+widget can watch a single path.
+
+Typical use from an agent runtime:
+  agent-pipeline start --id "$REQ" --title "定价决策" --agent entrepreneur-agent
+  agent-pipeline step  --id "$REQ" --name classify --status ok --detail "strategy (rules)" --ms 3
+  agent-pipeline step  --id "$REQ" --name model    --status ok --detail "glm-5.3-flash" --ms 8200
+  agent-pipeline end   --id "$REQ" --state done --tokens-json '{"input":1200,"output":90,"cacheRead":4000,"costUsd":0.002}'
+
+Nothing here writes outside the state directory; failures are silent by design
+so instrumentation can never break the agent it is observing.
+"""
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import fcntl
+import json
+import os
+import sys
+from pathlib import Path
+
+STATE_HOME = Path(os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state"))
+STORE = STATE_HOME / "omarchy" / "agent-pipeline" / "requests.json"
+MAX_REQUESTS = 30
+
+
+def now() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def load() -> dict:
+    if not STORE.exists():
+        return {"updatedAt": now(), "requests": []}
+    try:
+        data = json.loads(STORE.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or not isinstance(data.get("requests"), list):
+            raise ValueError("bad shape")
+        return data
+    except (json.JSONDecodeError, OSError, ValueError):
+        return {"updatedAt": now(), "requests": []}
+
+
+def save(data: dict) -> None:
+    data["updatedAt"] = now()
+    data["requests"] = data["requests"][-MAX_REQUESTS:]
+    STORE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = STORE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, STORE)
+
+
+def with_lock(fn):
+    STORE.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = STORE.with_suffix(".lock")
+    with lock_path.open("w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            return fn()
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
+def find(data: dict, request_id: str) -> dict | None:
+    for row in data["requests"]:
+        if row.get("id") == request_id:
+            return row
+    return None
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(prog="agent-pipeline")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("start", help="open a request")
+    s.add_argument("--id", required=True)
+    s.add_argument("--title", default="")
+    s.add_argument("--agent", default="")
+    s.add_argument("--task-class", dest="task_class", default="")
+    s.add_argument("--route", default="")
+    s.add_argument("--model", default="")
+
+    st = sub.add_parser("step", help="append one pipeline step")
+    st.add_argument("--id", required=True)
+    st.add_argument("--name", required=True)
+    st.add_argument("--status", default="ok")
+    st.add_argument("--detail", default="")
+    st.add_argument("--ms", type=float, default=0.0)
+
+    e = sub.add_parser("end", help="close a request")
+    e.add_argument("--id", required=True)
+    e.add_argument("--state", default="done", choices=["done", "error", "running"])
+    e.add_argument("--tokens-json", dest="tokens_json", default=None)
+    e.add_argument("--model", default=None)
+    e.add_argument("--route", default=None)
+    e.add_argument("--task-class", dest="task_class", default=None)
+
+    em = sub.add_parser("emit", help="append a complete request object (JSON)")
+    em.add_argument("json")
+
+    sub.add_parser("clear", help="remove all recorded requests")
+    sub.add_parser("demo", help="write one sample pipeline for a first look")
+
+    args = p.parse_args()
+
+    if args.cmd == "start":
+        def op() -> int:
+            data = load()
+            if find(data, args.id) is None:
+                data["requests"].append({
+                    "id": args.id, "at": now(), "title": args.title, "agent": args.agent,
+                    "state": "running", "taskClass": args.task_class, "route": args.route,
+                    "model": args.model,
+                    "tokens": {"input": 0, "output": 0, "cacheRead": 0, "costUsd": 0.0},
+                    "steps": [],
+                })
+                save(data)
+            return 0
+        return with_lock(op)
+
+    if args.cmd == "step":
+        def op() -> int:
+            data = load()
+            row = find(data, args.id)
+            if row is None:
+                row = {"id": args.id, "at": now(), "title": "", "agent": "", "state": "running",
+                       "taskClass": "", "route": "", "model": "",
+                       "tokens": {"input": 0, "output": 0, "cacheRead": 0, "costUsd": 0.0}, "steps": []}
+                data["requests"].append(row)
+            row.setdefault("steps", []).append({
+                "name": args.name, "status": args.status, "detail": args.detail, "ms": round(args.ms, 1),
+            })
+            row["state"] = "error" if args.status in ("error", "failed") else row.get("state", "running")
+            save(data)
+            return 0
+        return with_lock(op)
+
+    if args.cmd == "end":
+        def op() -> int:
+            data = load()
+            row = find(data, args.id)
+            if row is None:
+                return 0
+            row["state"] = "error" if args.state == "error" else ("running" if args.state == "running" else "done")
+            if args.tokens_json:
+                try:
+                    row["tokens"] = json.loads(args.tokens_json)
+                except json.JSONDecodeError:
+                    pass
+            if args.model:
+                row["model"] = args.model
+            if args.route:
+                row["route"] = args.route
+            if args.task_class:
+                row["taskClass"] = args.task_class
+            save(data)
+            return 0
+        return with_lock(op)
+
+    if args.cmd == "emit":
+        def op() -> int:
+            try:
+                row = json.loads(args.json)
+            except json.JSONDecodeError:
+                return 1
+            data = load()
+            data["requests"] = [r for r in data["requests"] if r.get("id") != row.get("id")]
+            data["requests"].append(row)
+            save(data)
+            return 0
+        return with_lock(op)
+
+    if args.cmd == "clear":
+        def op() -> int:
+            save({"updatedAt": now(), "requests": []})
+            return 0
+        return with_lock(op)
+
+    if args.cmd == "demo":
+        def op() -> int:
+            data = load()
+            data["requests"].append({
+                "id": "demo-" + dt.datetime.now().strftime("%H%M%S"),
+                "at": now(), "title": "定价策略评审", "agent": "entrepreneur-agent",
+                "state": "done", "taskClass": "strategy", "route": "strong",
+                "model": "zai/glm-5.3-highspeed",
+                "tokens": {"input": 1240, "output": 96, "cacheRead": 4180, "costUsd": 0.0023},
+                "steps": [
+                    {"name": "classify", "status": "ok", "detail": "strategy (rules)", "ms": 2},
+                    {"name": "route", "status": "ok", "detail": "strong → glm-5.3-highspeed", "ms": 1},
+                    {"name": "memory", "status": "ok", "detail": "5 条本地检索注入", "ms": 130},
+                    {"name": "model", "status": "ok", "detail": "glm-5.3-highspeed", "ms": 8100},
+                    {"name": "verify", "status": "ok", "detail": "遥测已记录", "ms": 3},
+                ],
+            })
+            save(data)
+            return 0
+        return with_lock(op)
+
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except Exception:  # instrumentation must never break the caller
+        sys.exit(0)

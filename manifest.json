@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.ericyhm80.agent-pipeline",
+  "name": "Agent Pipeline",
+  "version": "1.0.0",
+  "author": "haomin.ye (ericyhm80)",
+  "license": "MIT",
+  "repository": "https://github.com/ericyhm80/omarchy-agent-pipeline",
+  "description": "See what an AI agent is actually doing: task classification, model route, memory retrieval, tool calls and verification, one pipeline per request.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Agent Pipeline",
+    "description": "Per-request agent pipeline (classify, route, retrieve, act, verify) with tokens and cost",
+    "category": "AI",
+    "allowMultiple": false,
+    "defaultSection": "center"
+  }
+}
