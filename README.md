@@ -27,6 +27,8 @@ The panel draws the agent's architecture as a **graph**, not a list:
   detail and its own duration;
 - under the graph: the request's duration, tokens (input / output / cache), cost, model, and
   every problem encountered (`issues`).
+- the canvas is sized to the graph's own bounding box, so the panel stays compact whatever a
+  runtime draws, and the UI is English throughout.
 
 While a request is still running the panel is **live**: the active node is highlighted, small
 dots flow along the edges it has traversed, the duration counts up, and the path fills in as the
