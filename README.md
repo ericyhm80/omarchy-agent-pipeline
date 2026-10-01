@@ -82,6 +82,12 @@ Other subcommands: `emit --json '<object>'` (complete request in one call),
 The bar glyph turns accent-coloured while a request is running, and urgent when
 the newest request errored or a step reported a warning.
 
+## Requirements
+
+- Omarchy with the Quickshell-based shell (the widget itself needs nothing else).
+- `python3` — only for the **optional** `agent-pipeline` writer CLI. Write the JSON file
+  yourself, from any language, and the widget still works. No other dependencies, no network access.
+
 ## Install
 
 ```bash
