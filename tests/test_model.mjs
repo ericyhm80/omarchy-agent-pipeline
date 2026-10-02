@@ -42,6 +42,36 @@ h = Model.computeHealth([req({ state: "error", signals: [{ dimension: "robustnes
 ok("fallback keeps robustness 100", h.robustness.score === 100, h.robustness.score);
 ok("fallback does not hide instability", h.stability.score === 75, h.stability.score);
 
+// --- absorbed vs unabsorbed tool failures (the 2026-10-02 miscalibration) -----
+// The runtime emits `tool_recovered` when a tool that failed later succeeds in the
+// same run. An absorbed failure is not a degradation; an unabsorbed one still is.
+const robFail = { dimension: "robustness", kind: "tool_failure", level: "warn", detail: "tool error in bash" };
+const robRec = { dimension: "robustness", kind: "tool_recovered", level: "info", detail: "tool bash succeeded" };
+
+h = Model.computeHealth([req({ signals: [robFail, robRec] })]);
+ok("cancelled tool failure costs nothing", h.robustness.score === 100, h.robustness.score);
+
+// the real recorded request pi-mur4zokx-wodj: 4 tool errors, all absorbed, R showed 68
+h = Model.computeHealth([req({ signals: [robFail, robFail, robFail, robFail, robRec, robRec, robRec, robRec] })]);
+ok("4 absorbed tool failures => 100 (this is what pinned R at 68)", h.robustness.score === 100, h.robustness.score);
+
+// the gate must still be able to fail: no recovery evidence => full cost
+h = Model.computeHealth([req({ signals: [robFail, robFail, robFail, robFail] })]);
+ok("4 uncancelled tool failures => 68", h.robustness.score === 68, h.robustness.score);
+
+h = Model.computeHealth([req({ signals: [robFail, robFail, robRec] })]);
+ok("1 of 2 failures recovered => 92", h.robustness.score === 92, h.robustness.score);
+ok("drivers count only the uncancelled failure", h.robustness.drivers[0].key === "tool_failure" && h.robustness.drivers[0].count === 1, JSON.stringify(h.robustness.drivers));
+
+h = Model.computeHealth([req({ signals: [robRec, robFail] })]);
+ok("a recovery with nothing to cancel is a no-op, not a credit", h.robustness.score === 92, h.robustness.score);
+
+h = Model.computeHealth([req({ signals: [robFail, { dimension: "robustness", kind: "recovered", level: "info" }] })]);
+ok("run-level `recovered` does not cancel a tool failure", h.robustness.score === 92, h.robustness.score);
+
+h = Model.computeHealth([req({ signals: [robRec] }), req({ signals: [robFail] })]);
+ok("recovery does not leak into another request", h.robustness.score === 92, h.robustness.score);
+
 // three errors cross the alert floor
 h = Model.computeHealth([req({ state: "error" }), req({ state: "error" }), req({ state: "error" })]);
 ok("repeated errors alert", h.alert === true && h.stability.level === "alert", h.alertReason);

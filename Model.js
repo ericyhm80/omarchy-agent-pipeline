@@ -243,7 +243,7 @@ var HEALTH = {
   signals: {
     stability:  { retry: 5, timeout: 12, rate_limit: 8, provider_outage: 15, model_error: 12, custom: 5 },
     robustness: { unhandled: 8, provider_outage: 12, tool_failure: 8, degraded: 2,
-                  recovered: 0, fallback_used: 0, custom: 5 },
+                  recovered: 0, fallback_used: 0, tool_recovered: 0, custom: 5 },
     security:   { secret_exposure: 45, external_send_unauthorized: 40, human_gate_bypass: 35,
                   sandbox_violation: 35, policy_violation: 30, prompt_injection: 25,
                   stealth_unauthorized: 25, risky_command: 10, custom: 10,
@@ -295,6 +295,45 @@ function applySignals(signals, dimension, bag) {
     var pen = signalPenalty(dimension, sig)
     total += pen
     if (pen > 0) bump(bag, String(sig.kind || "custom"), pen)
+  }
+  return total
+}
+
+// Robustness is the one dimension with a *cancelling* signal. The runtime emits
+// `tool_recovered` when a tool that failed earlier in the same run later succeeds:
+// an absorbed failure is not a degradation, and scoring it as one made every probe,
+// retried edit and no-match grep a permanent alarm. Measured 2026-10-02: one
+// 31-minute run with 4 absorbed tool errors pinned R at 68 for the whole window.
+//
+// Cancellation is explicit and kind-matched: one `tool_recovered` removes the most
+// recent uncancelled `tool_failure` in the same request, and is a no-op when there
+// is nothing to cancel. A plain `recovered` (the whole run finished after a
+// fallback) does NOT cancel tool failures — different claim, different signal.
+// Cancelled failures still live in the stored request as evidence; they are only
+// kept out of the score and out of the driver list.
+function applyRobustnessSignals(signals, bag) {
+  var pending = []
+  for (var i = 0; i < signals.length; i++) {
+    var sig = signals[i] || {}
+    if (String(sig.dimension || "") !== "robustness") continue
+    var kind = String(sig.kind || "custom")
+    if (kind === "tool_recovered") {
+      for (var j = pending.length - 1; j >= 0; j--) {
+        if (pending[j].kind === "tool_failure" && !pending[j].cancelled) {
+          pending[j].cancelled = true
+          break
+        }
+      }
+      continue
+    }
+    var pen = signalPenalty("robustness", sig)
+    if (pen > 0) pending.push({ kind: kind, pen: pen, cancelled: false })
+  }
+  var total = 0
+  for (var k = 0; k < pending.length; k++) {
+    if (pending[k].cancelled) continue
+    total += pending[k].pen
+    bump(bag, pending[k].kind, pending[k].pen)
   }
   return total
 }
@@ -364,7 +403,7 @@ function computeHealth(requests, window) {
       if (outage && !hasRecovery && !hasFallback) {
         q += HEALTH.robustness.providerOutageUnrecovered; bump(robBag, "providerOutageUnrecovered", HEALTH.robustness.providerOutageUnrecovered)
       }
-      q += applySignals(signals, "robustness", robBag)
+      q += applyRobustnessSignals(signals, robBag)
       robPenalty += Math.min(q, HEALTH.robustness.cap)
     }
 

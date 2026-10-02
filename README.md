@@ -57,7 +57,7 @@ invented — a dimension with no evidence reads `n/a`, never a perfect score:
 | dimension | the question it answers | evidence it is scored from |
 |---|---|---|
 | **stability** | does a run do its job? | errored runs, warnings, failed stages, retry / timeout / rate-limit / provider-outage signals |
-| **robustness** | does it degrade and recover gracefully? | errors with and without a fallback, tool failures, degraded runs |
+| **robustness** | does it degrade **and recover** gracefully? | errors with and without a fallback, tool failures (each cancelled by a matching `tool_recovered`), degraded runs |
 | **security** | does it respect the gate and contain risk? | the security signals a runtime reports: gate bypass, secret exposure, sandbox / policy violations, prompt injection, risky commands |
 
 Each score is `100` minus the penalties of its signals and run outcomes (the
@@ -74,6 +74,23 @@ Signals are the runtime's own observations — the only way the widget can know
 what it cannot see (a human gate that was skipped, a sandbox violation, a stealth
 exception). A signal's default penalty comes from its `kind`; pass `--weight N` to
 override it for one signal.
+
+### A failure that was absorbed is not a degradation
+
+`tool_recovered` is the one signal that cancels instead of adding. A runtime emits
+it when a tool that failed earlier in the *same request* later succeeds; one
+recovery removes the most recent unmatched `tool_failure` (kind-matched, never
+across requests, and a no-op when there is nothing to cancel). A whole-run
+`recovered` — the run finished after a fallback — is a different claim and does
+**not** cancel tool failures.
+
+Why it exists: on 2026-10-02 this widget showed robustness **68** for an entire
+window because one 31-minute run recorded four tool errors that were all absorbed
+and worked around. Every probe and retried edit would have stayed on the score
+forever, which trains you to ignore the number. The failure itself is still
+recorded either way; only the score and the driver list drop the cancelled ones.
+An unabsorbed failure — nothing succeeded after it — still costs its full weight,
+so the dimension can still go down.
 
 ## The window, not just one run
 
@@ -144,7 +161,7 @@ has to write `requests`. `status` accepts `ok`, `running`, `warn`, `error`, `ski
 `state` accepts `running`, `done`, `error`; `issues[].level` accepts `info`, `warn`, `error`.
 `signals[].dimension` accepts `stability`, `robustness`, `security`; `signals[].kind` is one of
 the documented kinds (`provider_outage`, `retry`, `timeout`, `rate_limit`, `model_error`,
-`fallback_used`, `tool_failure`, `degraded`, `recovered`, `secret_exposure`,
+`fallback_used`, `tool_failure`, `tool_recovered`, `degraded`, `recovered`, `secret_exposure`,
 `external_send_unauthorized`, `human_gate_bypass`, `sandbox_violation`, `policy_violation`,
 `prompt_injection`, `stealth_unauthorized`, `risky_command`, `no_risk_detected`, …). An unknown
 kind uses a small default; set `signals[].weight` to override one signal. `metrics` and `env`
