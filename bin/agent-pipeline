@@ -11,7 +11,16 @@ Typical use from an agent runtime:
   agent-pipeline start --id "$REQ" --title "定价决策" --agent entrepreneur-agent
   agent-pipeline step  --id "$REQ" --name classify --status ok --detail "strategy (rules)" --ms 3
   agent-pipeline step  --id "$REQ" --name model    --status ok --detail "glm-5.3-flash" --ms 8200
-  agent-pipeline end   --id "$REQ" --state done --tokens-json '{"input":1200,"output":90,"cacheRead":4000,"costUsd":0.002}'
+  agent-pipeline signal --id "$REQ" --dimension robustness --kind fallback_used --level info \
+      --detail "z.ai 502, continued on GLM"
+  agent-pipeline signal --id "$REQ" --dimension security --kind human_gate_bypass --level error \
+      --detail "L2 decision sent without sign-off"
+  agent-pipeline end   --id "$REQ" --state done --tokens-json '{"input":1200,"output":90,"cacheRead":4000,"costUsd":0.002}' \
+      --metrics-json '{"toolCalls":5,"apiCalls":3,"retries":1}' --env-json '{"provider":"z.ai","sandbox":true}'
+
+`signal` is how a runtime reports the architecture's stability, robustness and
+security: the widget scores those three dimensions from the signals and run
+outcomes (see README). A dimension with no signals reads n/a, never 100.
 
 Nothing here writes outside the state directory; failures are silent by design
 so instrumentation can never break the agent it is observing.
@@ -106,6 +115,13 @@ def find(data: dict, request_id: str) -> dict | None:
     return None
 
 
+def blank(rid: str) -> dict:
+    return {"id": rid, "at": now(), "title": "", "agent": "", "state": "running",
+            "taskClass": "", "route": "", "model": "",
+            "tokens": {"input": 0, "output": 0, "cacheRead": 0, "costUsd": 0.0},
+            "nodes": [], "edges": [], "issues": [], "signals": []}
+
+
 def main() -> int:
     p = argparse.ArgumentParser(prog="agent-pipeline")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -134,6 +150,8 @@ def main() -> int:
     e.add_argument("--task-class", dest="task_class", default=None)
     e.add_argument("--duration-ms", dest="duration_ms", type=float, default=None)
     e.add_argument("--summary", default=None)
+    e.add_argument("--metrics-json", dest="metrics_json", default=None)
+    e.add_argument("--env-json", dest="env_json", default=None)
 
     em = sub.add_parser("emit", help="append a complete request object (JSON)")
     em.add_argument("json")
@@ -159,6 +177,16 @@ def main() -> int:
     i.add_argument("--level", default="warn", choices=["warn", "error", "info"])
     i.add_argument("--node", default="")
     i.add_argument("--detail", required=True)
+
+    sg = sub.add_parser("signal", help="record one stability/robustness/security observation")
+    sg.add_argument("--id", required=True)
+    sg.add_argument("--dimension", required=True, choices=["stability", "robustness", "security"])
+    sg.add_argument("--kind", required=True)
+    sg.add_argument("--level", default="warn", choices=["info", "warn", "error"])
+    sg.add_argument("--detail", default="")
+    sg.add_argument("--node", default="")
+    sg.add_argument("--weight", type=float, default=None,
+                    help="override the default penalty for this kind (see the widget's Model.js)")
 
     sub.add_parser("clear", help="remove all recorded requests")
     sub.add_parser("demo", help="write one sample pipeline for a first look")
@@ -219,6 +247,16 @@ def main() -> int:
                 row["durationMs"] = round(args.duration_ms, 1)
             if args.summary:
                 row["summary"] = args.summary
+            if args.metrics_json:
+                try:
+                    row["metrics"] = {**(row.get("metrics") or {}), **json.loads(args.metrics_json)}
+                except json.JSONDecodeError:
+                    pass
+            if args.env_json:
+                try:
+                    row["env"] = {**(row.get("env") or {}), **json.loads(args.env_json)}
+                except json.JSONDecodeError:
+                    pass
             save(data)
             return 0
         return with_lock(op)
@@ -336,6 +374,13 @@ def main() -> int:
                     row["state"] = "error"
             for issue in patch.get("issues") or []:
                 row.setdefault("issues", []).append(issue)
+            if isinstance(patch.get("env"), dict):
+                row["env"] = {**(row.get("env") or {}), **patch["env"]}
+            if isinstance(patch.get("metrics"), dict):
+                row["metrics"] = {**(row.get("metrics") or {}), **patch["metrics"]}
+            for sig in patch.get("signals") or []:
+                if isinstance(sig, dict):
+                    row.setdefault("signals", []).append(sig)
             if patch.get("archReset"):
                 data["architecture"] = DEFAULT_ARCHITECTURE
             save(data)
@@ -351,6 +396,24 @@ def main() -> int:
             row.setdefault("issues", []).append({
                 "level": args.level, "node": args.node, "detail": args.detail, "at": now(),
             })
+            save(data)
+            return 0
+        return with_lock(op)
+
+    if args.cmd == "signal":
+        def op() -> int:
+            data = load()
+            row = find(data, args.id)
+            if row is None:
+                row = blank(args.id)
+                data["requests"].append(row)
+            entry = {"dimension": args.dimension, "kind": args.kind, "level": args.level,
+                     "detail": args.detail, "at": now()}
+            if args.node:
+                entry["node"] = args.node
+            if args.weight is not None:
+                entry["weight"] = args.weight
+            row.setdefault("signals", []).append(entry)
             save(data)
             return 0
         return with_lock(op)

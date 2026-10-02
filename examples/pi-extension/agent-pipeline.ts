@@ -2,8 +2,13 @@
 //
 // The web console instruments itself; this extension does the same for CLI and
 // any other pi session, through the documented state file the widget watches.
+// It reports not just the pipeline but the runtime picture — provider, metrics,
+// and the stability / robustness / security signals the widget scores.
+//
 // Instrumentation must never break the agent it observes: every emit is
-// fire-and-forget with a short timeout inside try/catch.
+// fire-and-forget with a short timeout inside try/catch. The risk scan records
+// a pattern *label only* — never the command text — so secrets cannot leak into
+// the state file.
 export default function (pi) {
   // A host that instruments itself (the web console) sets this, so the same run
   // is not reported twice — the host knows more about the run than we can see here.
@@ -13,9 +18,33 @@ export default function (pi) {
   })();
   if (selfInstrumented) return;
 
+  // Conservative, label-only command scan. A match never blocks anything — it is
+  // one security data point the runtime reports about itself.
+  const RISK_PATTERNS = [
+    { re: /\bsudo\b/, label: "privilege escalation (sudo)" },
+    { re: /rm\s+-[a-z]*[rf][a-z]*\s+(\/|~)(\s|\/|$)/, label: "recursive delete of root or home" },
+    { re: /(curl|wget)[^\n|]*\|\s*(ba|z)?sh\b/, label: "piping remote content to a shell" },
+    { re: /git\s+push\b[^\n]*(\s--force(\s|$)|\s-f(\s|$))/, label: "force push" },
+    { re: /chmod\s+(-R\s+)?777\b/, label: "world-writable chmod" },
+    { re: /:\(\)\s*\{.*\};\s*:/, label: "fork bomb" }
+  ];
+  function scanCommand(cmd) {
+    const text = String(cmd || "");
+    for (const p of RISK_PATTERNS) {
+      if (p.re.test(text)) return p.label;
+    }
+    return "";
+  }
+
   let id = "";
   let startedAt = 0;
   let toolCalls = 0;
+  let toolErrors = 0;
+  let apiCalls = 0;
+  let providerStatus = [];       // non-2xx statuses seen this run
+  let risks = new Set();         // risk labels matched this run
+  let commands = 0;              // bash commands scanned (for coverage, not content)
+  let fallback = false;
   let usage = null;
   let running = false;
 
@@ -27,19 +56,32 @@ export default function (pi) {
     }
   }
 
-  pi.on("before_agent_start", async (event) => {
+  pi.on("before_agent_start", async (event, ctx) => {
     id = "pi-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 6);
     startedAt = Date.now();
     toolCalls = 0;
+    toolErrors = 0;
+    apiCalls = 0;
+    providerStatus = [];
+    risks = new Set();
+    commands = 0;
+    fallback = false;
     usage = null;
     running = true;
     const prompt = String(event?.prompt ?? "");
     const title = prompt.trim().split("\n")[0].slice(0, 120);
+    let provider = "", modelId = "";
+    try {
+      provider = String(ctx?.model?.provider ?? "");
+      modelId = String(ctx?.model?.id ?? ctx?.model?.name ?? "");
+    } catch { /* viewer only */ }
     await patch({
       id,
       title,
       agent: "pi-cli",
       state: "running",
+      model: modelId,
+      env: { provider, model: modelId },
       nodes: [
         { id: "input", status: "ok", detail: prompt.length + " chars", ms: 0 },
         { id: "router", status: "skipped", detail: "cli: no router stage", ms: 0 },
@@ -55,12 +97,71 @@ export default function (pi) {
     await patch({ id, nodes: [{ id: "model", status: "running", detail: "model call", ms: 0 }] });
   });
 
+  pi.on("after_provider_response", async (event) => {
+    if (!running) return;
+    apiCalls += 1;
+    const status = Number(event?.status ?? 0);
+    if (status >= 200 && status < 300) return;
+    providerStatus.push(status);
+    const kind = status === 429 ? "rate_limit" : (status >= 500 ? "provider_outage" : "model_error");
+    const detail = "HTTP " + status + " from provider";
+    await patch({
+      id,
+      metrics: { apiCalls, errors: providerStatus.length },
+      signals: [{ dimension: "stability", kind, level: "warn", detail, node: "model" }]
+    });
+  });
+
   pi.on("tool_call", async (event) => {
     if (!running) return;
     toolCalls += 1;
+    const toolName = String(event?.toolName ?? "tool");
+    const args = event?.args ?? {};
+    if (toolName === "bash") {
+      commands += 1;
+      const label = scanCommand(args.command ?? args.cmd ?? "");
+      if (label && !risks.has(label)) {
+        risks.add(label);
+        await patch({
+          id,
+          signals: [{ dimension: "security", kind: "risky_command", level: "warn", detail: label, node: "tools" }]
+        });
+      }
+    }
     await patch({
       id,
-      nodes: [{ id: "tools", status: "running", detail: String(event?.toolName ?? "tool") + (toolCalls > 1 ? " (+" + (toolCalls - 1) + ")" : ""), ms: 0 }]
+      metrics: { toolCalls },
+      nodes: [{ id: "tools", status: "running", detail: toolName + (toolCalls > 1 ? " (+" + (toolCalls - 1) + ")" : ""), ms: 0 }]
+    });
+  });
+
+  pi.on("tool_execution_end", async (event) => {
+    if (!running) return;
+    if (!event?.isError) return;
+    toolErrors += 1;
+    await patch({
+      id,
+      metrics: { toolCalls, toolErrors },
+      signals: [{ dimension: "robustness", kind: "tool_failure", level: "warn",
+                  detail: "tool error in " + String(event?.toolName ?? "tool"), node: "tools" }]
+    });
+  });
+
+  pi.on("model_select", async (event) => {
+    if (!running) return;
+    fallback = true;   // the model changed mid-run: a fallback/switch happened
+    let provider = "", modelId = "";
+    try {
+      provider = String(event?.model?.provider ?? "");
+      modelId = String(event?.model?.id ?? event?.model?.name ?? "");
+    } catch { /* viewer only */ }
+    await patch({
+      id,
+      model: modelId,
+      env: { provider, model: modelId },
+      metrics: { fallbacks: 1 },
+      signals: [{ dimension: "robustness", kind: "fallback_used", level: "info",
+                  detail: "switched to " + (modelId || "another model") }]
     });
   });
 
@@ -86,17 +187,29 @@ export default function (pi) {
     const detail = tokens.input || tokens.output
       ? (tokens.input + tokens.output) + " tokens"
       : "completed";
+
+    const signals = [];
+    if (fallback) signals.push({ dimension: "robustness", kind: "recovered", level: "info", detail: "run completed after fallback" });
+    if (providerStatus.length) signals.push({ dimension: "robustness", kind: "degraded", level: "info",
+      detail: "completed despite " + providerStatus.length + " provider error(s)" });
+    // mark security coverage: the run's commands were scanned and none were risky
+    if (risks.size === 0) signals.push({ dimension: "security", kind: "no_risk_detected", level: "info",
+      detail: commands + " command(s) scanned, no high-risk pattern" });
+
     await patch({
       id,
       state: "done",
       durationMs,
       tokens,
+      metrics: { toolCalls, toolErrors, apiCalls, fallbacks: fallback ? 1 : 0, errors: providerStatus.length },
       nodes: [
         { id: "model", status: "ok", detail, ms: durationMs },
-        { id: "tools", status: toolCalls ? "ok" : "skipped", detail: toolCalls ? toolCalls + " tool calls" : "no tools needed", ms: 0 },
+        { id: "tools", status: toolCalls ? (toolErrors ? "warn" : "ok") : "skipped",
+          detail: toolCalls ? toolCalls + " tool calls" + (toolErrors ? ", " + toolErrors + " failed" : "") : "no tools needed", ms: 0 },
         { id: "verify", status: usage ? "ok" : "warn", detail: usage ? "usage captured" : "no usage captured", ms: 0 },
         { id: "output", status: "ok", detail: "returned to terminal", ms: 0 }
       ],
+      signals,
       issues: usage ? [] : [{ level: "warn", node: "verify", detail: "no usage captured for this run" }]
     });
   });

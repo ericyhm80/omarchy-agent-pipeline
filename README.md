@@ -3,7 +3,9 @@
 An Omarchy bar widget that renders **one pipeline per agent request**: how the
 request was classified, which model tier it was routed to, what memory was
 retrieved, which tools ran, and whether the result was verified — with timing,
-tokens and cost.
+tokens and cost. Above the graph it also scores the running architecture on
+**stability, robustness and security**, and under the run it shows every runtime
+metric, so a glance tells you both what happened and how healthy the system is.
 
 It exists for two audiences:
 
@@ -28,7 +30,12 @@ The panel draws the agent's architecture as a **graph**, not a list:
 - under the graph: the request's duration, tokens (input / output / cache), cost, model, and
   every problem encountered (`issues`).
 - the canvas is sized to the graph's own bounding box, so the panel stays compact whatever a
-  runtime draws, and the UI is English throughout.
+  runtime draws, and the UI is English throughout;
+- above the graph, **architecture health** — stability / robustness / security
+  scores with a one-line alert when one slips;
+- under the run, every **runtime fact** it recorded: duration, tokens in/out/cache,
+  cost, cache hit rate, throughput, tool calls, api calls, retries, fallbacks,
+  errors, and the provider/model.
 
 While a request is still running the panel is **live**: the active node is highlighted, small
 dots flow along the edges it has traversed, the duration counts up, and the path fills in as the
@@ -37,6 +44,33 @@ usable for explaining an agent to someone who has never seen one: what it classi
 as, which model it chose, what it retrieved, which tools it ran, and what went wrong.
 
 ![pipeline graph](preview.png)
+
+## Architecture health
+
+Above the graph the panel scores the architecture on three dimensions over the
+last 20 settled requests, from what the runtime actually recorded. Nothing is
+invented — a dimension with no evidence reads `n/a`, never a perfect score:
+
+| dimension | the question it answers | evidence it is scored from |
+|---|---|---|
+| **stability** | does a run do its job? | errored runs, warnings, failed stages, retry / timeout / rate-limit / provider-outage signals |
+| **robustness** | does it degrade and recover gracefully? | errors with and without a fallback, tool failures, degraded runs |
+| **security** | does it respect the gate and contain risk? | the security signals a runtime reports: gate bypass, secret exposure, sandbox / policy violations, prompt injection, risky commands |
+
+Each score is `100` minus the penalties of its signals and run outcomes (the
+weights live in one place, `Model.js` → `HEALTH`). Colours: **≥85** normal,
+**70–84** watch, **<70** alert, **n/a** unknown. When a score is in alert the bar
+glyph turns urgent and the panel shows one line naming the worst dimension and
+its top driver:
+
+```
+⚠ architecture health: security 55 — secret exposure ×1
+```
+
+Signals are the runtime's own observations — the only way the widget can know
+what it cannot see (a human gate that was skipped, a sandbox violation, a stealth
+exception). A signal's default penalty comes from its `kind`; pass `--weight N` to
+override it for one signal.
 
 ## How it gets data
 
@@ -63,6 +97,8 @@ $XDG_STATE_HOME/omarchy/agent-pipeline/requests.json      # usually ~/.local/sta
       "state": "done", "taskClass": "lookup", "route": "cheap", "model": "zai/glm-5.3-flash",
       "durationMs": 15500,
       "tokens": { "input": 352, "output": 166, "cacheRead": 4928, "costUsd": 0.00028 },
+      "env": { "provider": "z.ai", "model": "glm-5.3-flash" },
+      "metrics": { "toolCalls": 2, "apiCalls": 3, "retries": 0, "fallbacks": 1, "toolErrors": 0 },
       "nodes": [
         { "id": "router",  "status": "ok",      "detail": "lookup → cheap", "ms": 239 },
         { "id": "memory",  "status": "ok",      "detail": "1 item retrieved", "ms": 2793 },
@@ -71,7 +107,12 @@ $XDG_STATE_HOME/omarchy/agent-pipeline/requests.json      # usually ~/.local/sta
         { "id": "verify",  "status": "ok",      "detail": "telemetry recorded", "ms": 1 }
       ],
       "edges": [ { "from": "input", "to": "router" }, { "from": "router", "to": "memory" } ],
-      "issues": [ { "level": "warn", "node": "model", "detail": "codex hit its limit, fell back to GLM" } ]
+      "issues": [ { "level": "warn", "node": "model", "detail": "codex hit its limit, fell back to GLM" } ],
+      "signals": [
+        { "dimension": "stability",  "kind": "provider_outage",  "level": "warn", "detail": "z.ai 502" },
+        { "dimension": "robustness", "kind": "fallback_used",    "level": "info", "detail": "continued on GLM" },
+        { "dimension": "security",   "kind": "no_risk_detected", "level": "info", "detail": "3 commands scanned" }
+      ]
     }
   ]
 }
@@ -84,7 +125,14 @@ pipeline graph. The panel picks the request's graph when it has one and the glob
 Omit `architecture` and the widget falls back to the pipeline it ships with, so a runtime only
 has to write `requests`. `status` accepts `ok`, `running`, `warn`, `error`, `skipped`;
 `state` accepts `running`, `done`, `error`; `issues[].level` accepts `info`, `warn`, `error`.
-The widget keeps the newest 30 requests and shows the newest by default.
+`signals[].dimension` accepts `stability`, `robustness`, `security`; `signals[].kind` is one of
+the documented kinds (`provider_outage`, `retry`, `timeout`, `rate_limit`, `model_error`,
+`fallback_used`, `tool_failure`, `degraded`, `recovered`, `secret_exposure`,
+`external_send_unauthorized`, `human_gate_bypass`, `sandbox_violation`, `policy_violation`,
+`prompt_injection`, `stealth_unauthorized`, `risky_command`, `no_risk_detected`, …). An unknown
+kind uses a small default; set `signals[].weight` to override one signal. `metrics` and `env`
+are free-form and rendered as runtime facts. The widget keeps the newest 30 requests and shows
+the newest by default.
 
 ## Recording a request
 
@@ -100,9 +148,12 @@ agent-pipeline node  --id "$REQ" --node router --status ok --detail "lookup → 
 agent-pipeline node  --id "$REQ" --node memory --status ok --detail "1 item retrieved"      --ms 2793
 agent-pipeline node  --id "$REQ" --node model  --status ok --detail "zai/glm-5.3-flash"  --ms 11989
 agent-pipeline node  --id "$REQ" --node tools  --status ok --detail "2 tool calls"          --ms 0
-agent-pipeline issue --id "$REQ" --level warn --node model --detail "codex hit its limit, fell back to GLM"
+agent-pipeline issue  --id "$REQ" --level warn --node model --detail "codex hit its limit, fell back to GLM"
+agent-pipeline signal --id "$REQ" --dimension robustness --kind fallback_used --level info --detail "continued on GLM"
+agent-pipeline signal --id "$REQ" --dimension security --kind human_gate_bypass --level error --detail "L2 sent without sign-off"
 agent-pipeline end   --id "$REQ" --state done --duration-ms 15500 \
-  --tokens-json '{"input":352,"output":166,"cacheRead":4928,"costUsd":0.00028}'
+  --tokens-json '{"input":352,"output":166,"cacheRead":4928,"costUsd":0.00028}' \
+  --metrics-json '{"toolCalls":2,"apiCalls":3,"fallbacks":1}' --env-json '{"provider":"z.ai"}'
 ```
 
 Recording a node also marks the edge that feeds it as traversed, so edges never have to be
@@ -154,6 +205,12 @@ omarchy plugin add https://github.com/ericyhm80/omarchy-agent-pipeline --enable
 omarchy plugin enable io.github.ericyhm80.agent-pipeline --section center
 agent-pipeline demo        # see it with sample data
 ```
+
+## Development note
+
+Saving a QML file reloads the plugin automatically. **A change to `Model.js`
+(the scoring engine) needs a full `omarchy restart shell`**: `.pragma library`
+modules are cached and a plugin rescan alone will not pick them up.
 
 ## Privacy
 

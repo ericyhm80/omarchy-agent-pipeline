@@ -1,2 +1,4 @@
-*.tmp
-*.lock
+*.tmp$
+*.lock$
+__pycache__/
+*.pyc

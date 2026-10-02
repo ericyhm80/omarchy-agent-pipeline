@@ -224,8 +224,272 @@ function totalMs(request) {
   return sum
 }
 
+// ================================================================ health ==
+// Stability / robustness / security, computed mechanically from what a runtime
+// actually recorded. Nothing is invented: a dimension with no evidence reads
+// "unknown" (n/a), never a perfect score, and every score below 100 carries the
+// drivers that pulled it down so the number stays explainable.
+//
+// All weights are ASSUMPTIONS, kept in one place so they can be tuned. They are
+// penalties subtracted from 100 over a rolling window of settled requests.
+// Signals (dimension/kind/level/detail/weight) are the runtime's own
+// observations; `weight` overrides the default for a kind.
+var HEALTH = {
+  window: 20,
+  alertFloor: 70,
+  watchFloor: 85,
+  request: { errorState: 25, warnIssue: 5, errorIssue: 10, errorNode: 10, cap: 50 },
+  robustness: { errorNoFallback: 18, providerOutageUnrecovered: 12, cap: 50 },
+  signals: {
+    stability:  { retry: 5, timeout: 12, rate_limit: 8, provider_outage: 15, model_error: 12, custom: 5 },
+    robustness: { unhandled: 8, provider_outage: 12, tool_failure: 8, degraded: 2,
+                  recovered: 0, fallback_used: 0, custom: 5 },
+    security:   { secret_exposure: 45, external_send_unauthorized: 40, human_gate_bypass: 35,
+                  sandbox_violation: 35, policy_violation: 30, prompt_injection: 25,
+                  stealth_unauthorized: 25, risky_command: 10, custom: 10,
+                  no_risk_detected: 0, human_gate_ok: 0, gate_enforced: 0 }
+  },
+  label: {
+    errorState: "errored runs", warnIssue: "warnings", errorIssue: "errors", errorNode: "failed stages",
+    retry: "retries", timeout: "timeouts", rate_limit: "rate limits", provider_outage: "provider outages",
+    model_error: "model errors",
+    errorNoFallback: "errors without fallback", unhandled: "unhandled issues", tool_failure: "tool failures",
+    degraded: "degraded runs",
+    secret_exposure: "secret exposure", external_send_unauthorized: "unauthorized external sends",
+    human_gate_bypass: "human-gate bypasses", sandbox_violation: "sandbox violations",
+    policy_violation: "policy violations", prompt_injection: "prompt injection",
+    stealth_unauthorized: "unauthorized stealth", risky_command: "risky commands"
+  }
+}
+
+function signalPenalty(dimension, sig) {
+  var table = HEALTH.signals[dimension] || {}
+  if (sig && sig.weight !== undefined && sig.weight !== null && isFinite(Number(sig.weight)))
+    return Number(sig.weight)
+  var k = String((sig && sig.kind) || "custom")
+  if (table[k] !== undefined) return Number(table[k])
+  return Number(table.custom || 5)
+}
+
+function labelFor(key) { return HEALTH.label[key] || String(key || "").replace(/_/g, " ") }
+
+function bump(bag, key, penalty) {
+  if (!penalty) return
+  var row = bag[key] || (bag[key] = { key: key, label: labelFor(key), count: 0, penalty: 0 })
+  row.count += 1
+  row.penalty += penalty
+}
+
+function topDrivers(bag) {
+  var out = []
+  for (var k in bag) if (Object.prototype.hasOwnProperty.call(bag, k)) out.push(bag[k])
+  out.sort(function(a, b) { return b.penalty - a.penalty })
+  return out.slice(0, 3)
+}
+
+function applySignals(signals, dimension, bag) {
+  var total = 0
+  for (var i = 0; i < signals.length; i++) {
+    var sig = signals[i] || {}
+    if (String(sig.dimension || "") !== dimension) continue
+    var pen = signalPenalty(dimension, sig)
+    total += pen
+    if (pen > 0) bump(bag, String(sig.kind || "custom"), pen)
+  }
+  return total
+}
+
+function clampScore(v) { return Math.max(0, Math.min(100, Math.round(v))) }
+
+function healthLevel(score) {
+  if (score === null || score === undefined) return "unknown"
+  if (score >= HEALTH.watchFloor) return "good"
+  if (score >= HEALTH.alertFloor) return "watch"
+  return "alert"
+}
+
+function dimension(key, score, coverage, bag) {
+  return { key: key, score: score, coverage: coverage, level: healthLevel(score), drivers: topDrivers(bag) }
+}
+
+// A dimension is only scored when there is evidence for it; otherwise score is
+// null and the UI shows n/a instead of a misleading 100.
+function computeHealth(requests, window) {
+  var w = window || HEALTH.window
+  var rows = (requests || []).slice(0, w)
+  var settled = 0, secCoverage = 0, secCritical = false
+  var stabPenalty = 0, robPenalty = 0, secPenalty = 0
+  var stabBag = {}, robBag = {}, secBag = {}
+
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i] || {}
+    var state = String(r.state || "")
+    var signals = r.signals || []
+    var isSettled = state === "done" || state === "error" || Number(r.durationMs || 0) > 0
+    if (isSettled) settled++
+
+    var hasRecovery = false, hasFallback = false, outage = false
+    for (var s = 0; s < signals.length; s++) {
+      var kind = String((signals[s] || {}).kind || "")
+      if (kind === "recovered") hasRecovery = true
+      if (kind === "fallback_used") hasFallback = true
+      if (kind === "provider_outage") outage = true
+    }
+
+    if (isSettled) {
+      // ---- stability: did the run do its job?
+      var p = 0
+      if (state === "error") { p += HEALTH.request.errorState; bump(stabBag, "errorState", HEALTH.request.errorState) }
+      var iss = r.issues || []
+      for (var j = 0; j < iss.length; j++) {
+        var lvl = String((iss[j] || {}).level || "")
+        if (lvl === "error") { p += HEALTH.request.errorIssue; bump(stabBag, "errorIssue", HEALTH.request.errorIssue) }
+        else if (lvl === "warn") { p += HEALTH.request.warnIssue; bump(stabBag, "warnIssue", HEALTH.request.warnIssue) }
+      }
+      var nodes = r.nodes || [], nodeErr = 0
+      for (var n = 0; n < nodes.length; n++) {
+        var st = String((nodes[n] || {}).status || "")
+        if (st === "error" || st === "failed") nodeErr++
+      }
+      // only count failed stages directly when no issue already named them
+      if (nodeErr && iss.length === 0) { var np = nodeErr * HEALTH.request.errorNode; p += np; bump(stabBag, "errorNode", np) }
+      p += applySignals(signals, "stability", stabBag)
+      stabPenalty += Math.min(p, HEALTH.request.cap)
+
+      // ---- robustness: did it degrade and recover gracefully?
+      var q = 0
+      if (state === "error" && !hasRecovery && !hasFallback) {
+        q += HEALTH.robustness.errorNoFallback; bump(robBag, "errorNoFallback", HEALTH.robustness.errorNoFallback)
+      }
+      if (outage && !hasRecovery && !hasFallback) {
+        q += HEALTH.robustness.providerOutageUnrecovered; bump(robBag, "providerOutageUnrecovered", HEALTH.robustness.providerOutageUnrecovered)
+      }
+      q += applySignals(signals, "robustness", robBag)
+      robPenalty += Math.min(q, HEALTH.robustness.cap)
+    }
+
+    // ---- security: only what the runtime explicitly reported
+    var secSignals = 0
+    for (var t = 0; t < signals.length; t++) {
+      var sg = signals[t] || {}
+      if (String(sg.dimension || "") !== "security") continue
+      secSignals++
+      var pen = signalPenalty("security", sg)
+      if (pen > 0) bump(secBag, String(sg.kind || "custom"), pen)
+      if (String(sg.level || "") === "error" && pen > 0) secCritical = true
+      secPenalty += pen
+    }
+    if (secSignals > 0) secCoverage++
+  }
+
+  var stability = dimension("stability", settled ? clampScore(100 - stabPenalty) : null, settled, stabBag)
+  var robustness = dimension("robustness", settled ? clampScore(100 - robPenalty) : null, settled, robBag)
+  var security = dimension("security", secCoverage ? clampScore(100 - secPenalty) : null, secCoverage, secBag)
+
+  // security first — it is the dimension that must never slip
+  var dims = [security, stability, robustness]
+  var alertReason = ""
+  for (var d = 0; d < dims.length; d++) {
+    if (dims[d].level === "alert") {
+      var drv = dims[d].drivers.length ? " — " + dims[d].drivers[0].label + " ×" + dims[d].drivers[0].count : ""
+      alertReason = dims[d].key + " " + dims[d].score + drv
+      break
+    }
+  }
+  if (secCritical && !alertReason) alertReason = "security: " + (security.drivers[0] ? security.drivers[0].label : "critical signal")
+
+  return {
+    window: w, considered: rows.length, settled: settled,
+    stability: stability, robustness: robustness, security: security,
+    alert: !!alertReason, alertReason: alertReason
+  }
+}
+
+function healthRows(health) {
+  return [
+    { key: "stability",  label: "STABILITY",  score: health.stability.score,  level: health.stability.level,  coverage: health.stability.coverage },
+    { key: "robustness", label: "ROBUSTNESS", score: health.robustness.score, level: health.robustness.level, coverage: health.robustness.coverage },
+    { key: "security",   label: "SECURITY",   score: health.security.score,   level: health.security.level,   coverage: health.security.coverage }
+  ]
+}
+
+function healthColorKey(level) {
+  if (level === "good") return "normal"
+  if (level === "watch") return "accent"
+  if (level === "alert") return "urgent"
+  return "dim"
+}
+
+function fmtScore(score) {
+  if (score === null || score === undefined) return "n/a"
+  return String(Math.round(score))
+}
+
+// ------------------------------------------------------- runtime metrics --
+// Everything a run recorded, summarised as label/value facts so the panel can
+// show the whole runtime picture, not just the headline numbers.
+function cacheHitPct(request) {
+  var t = (request && request.tokens) || {}
+  var denom = Number(t.input || 0) + Number(t.cacheRead || 0)
+  if (denom <= 0) return null
+  return Math.round(100 * Number(t.cacheRead || 0) / denom)
+}
+
+function tokensPerSec(request) {
+  var d = Number((request && request.durationMs) || 0)
+  if (d <= 0) return null
+  var t = (request && request.tokens) || {}
+  var out = Number(t.output || 0) + Number(t.input || 0)
+  if (out <= 0) return null
+  return Math.round(out / (d / 1000))
+}
+
+function runtimeFacts(request) {
+  if (!request) return []
+  var t = request.tokens || {}, m = request.metrics || {}, e = request.env || {}
+  var out = []
+  function add(label, value) {
+    if (value === undefined || value === null) return
+    var v = String(value)
+    if (v === "" || v === "0") return
+    out.push({ label: label, value: v })
+  }
+  add("duration", fmtMs(durationMs(request)))
+  add("model", request.model)
+  add("provider", e.provider)
+  add("agent", request.agent)
+  add("route", request.route)
+  add("class", request.taskClass)
+  add("tok in", fmtTokens(t.input))
+  add("tok out", fmtTokens(t.output))
+  add("cache", fmtTokens(t.cacheRead))
+  add("cost", fmtCost(t.costUsd))
+  var hit = cacheHitPct(request)
+  if (hit !== null) add("cache hit", hit + "%")
+  var tps = tokensPerSec(request)
+  if (tps !== null) add("tok/s", tps)
+  add("tools", m.toolCalls)
+  add("api", m.apiCalls)
+  add("retries", m.retries)
+  add("fallbacks", m.fallbacks)
+  add("errors", m.errors)
+  var probs = problemCount(request)
+  if (probs) add("issues", probs)
+  return out
+}
+
 function shortClock(iso) {
   var d = new Date(String(iso || ""))
   if (isNaN(d.getTime())) return ""
-  return Qt.formatTime(d, "HH:mm")
+  if (typeof Qt !== "undefined" && Qt.formatTime) return Qt.formatTime(d, "HH:mm")
+  return ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2)
+}
+
+// Node (tests) can import this file after stripping the QML-only pragma.
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    parse: parse, computeHealth: computeHealth, healthRows: healthRows,
+    healthColorKey: healthColorKey, fmtScore: fmtScore, runtimeFacts: runtimeFacts,
+    cacheHitPct: cacheHitPct, tokensPerSec: tokensPerSec, HEALTH: HEALTH
+  }
 }

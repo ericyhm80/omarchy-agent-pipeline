@@ -24,7 +24,11 @@ BarWidget {
   readonly property int running: Model.runningCount(requests)
   readonly property int worst: latest ? Model.worstStepLevel(latest) : 0
 
-  readonly property bool alarming: worst > 0 || (!!latest && String(latest.state) === "error")
+  readonly property bool alarming: healthAlert || worst > 0 || (!!latest && String(latest.state) === "error")
+
+  // Architecture health, so the glyph can turn urgent before a score is low.
+  readonly property var health: Model.computeHealth(requests)
+  readonly property bool healthAlert: health.alert === true
   readonly property bool busy: running > 0 || (!!latest && String(latest.state) === "running")
 
   function reload() {
@@ -36,12 +40,16 @@ BarWidget {
   }
 
   function tooltip() {
-    if (!latest) return "Agent pipeline — no requests recorded yet"
+    var scores = "S " + Model.fmtScore(health.stability.score)
+      + " · R " + Model.fmtScore(health.robustness.score)
+      + " · Sec " + Model.fmtScore(health.security.score)
+    if (!latest) return "Agent pipeline — " + scores + " (no requests yet)"
     var parts = [String(latest.state || "").toUpperCase()]
     if (latest.title) parts.push(String(latest.title))
     if (latest.taskClass) parts.push(String(latest.taskClass))
     if (latest.model) parts.push(String(latest.model))
     if (running > 0) parts.push(running + " running")
+    parts.push(scores)
     return parts.join(" · ")
   }
 

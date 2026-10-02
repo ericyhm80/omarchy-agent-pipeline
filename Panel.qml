@@ -65,6 +65,12 @@ Panel {
   readonly property var activeIssues: Model.issues(active)
   readonly property int problems: Model.problemCount(active)
 
+  // Architecture health: stability / robustness / security over the recent
+  // window, plus every runtime fact the selected run recorded.
+  readonly property var health: Model.computeHealth(requests)
+  readonly property var healthRows: Model.healthRows(health)
+  readonly property var runtimeFacts: Model.runtimeFacts(active)
+
   function refresh() {
     dataView.reload()
   }
@@ -82,6 +88,14 @@ Panel {
   function stateColor(state) {
     if (String(state || "") === "waiting_human") return root.accent
     var key = Model.stateColorKey(state)
+    if (key === "accent") return root.accent
+    if (key === "urgent") return root.urgent
+    if (key === "normal") return root.foreground
+    return root.dim
+  }
+
+  function healthColor(level) {
+    var key = Model.healthColorKey(level)
     if (key === "accent") return root.accent
     if (key === "urgent") return root.urgent
     if (key === "normal") return root.foreground
@@ -249,6 +263,104 @@ Panel {
           }
         }
 
+        // ------------------------------------------------ architecture health
+        Row {
+          width: parent.width
+          spacing: Style.space(8)
+
+          Repeater {
+            model: root.healthRows
+
+            Rectangle {
+              id: gauge
+              required property var modelData
+              readonly property color scoreColor: root.healthColor(modelData.level)
+              readonly property real frac: modelData.score === null ? 0 : modelData.score / 100
+
+              width: (parent.width - 2 * Style.space(8)) / 3
+              height: gaugeCol.implicitHeight + Style.space(16)
+              radius: 8
+              color: root.withAlpha(scoreColor, 0.10)
+              border.width: 1
+              border.color: root.withAlpha(scoreColor, 0.55)
+
+              Column {
+                id: gaugeCol
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.leftMargin: Style.space(8)
+                anchors.rightMargin: Style.space(8)
+                spacing: Style.space(3)
+
+                Text {
+                  text: modelData.label
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                  font.bold: true
+                }
+
+                Text {
+                  text: modelData.score === null ? "n/a" : (Model.fmtScore(modelData.score) + " / 100")
+                  color: scoreColor
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.subtitle
+                  font.bold: true
+                }
+
+                Rectangle {
+                  width: parent.width
+                  height: 3
+                  radius: 1.5
+                  color: root.withAlpha(root.foreground, 0.14)
+                  Rectangle {
+                    width: parent.width * gauge.frac
+                    height: parent.height
+                    radius: 1.5
+                    color: gauge.scoreColor
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        // One line that says what is wrong, when anything is.
+        Rectangle {
+          width: parent.width
+          visible: root.health.alert
+          height: alertText.implicitHeight + Style.space(12)
+          radius: 8
+          color: root.withAlpha(root.urgent, 0.14)
+          border.width: 1
+          border.color: root.withAlpha(root.urgent, 0.6)
+
+          Text {
+            id: alertText
+            anchors.centerIn: parent
+            width: parent.width - Style.space(20)
+            text: "⚠ architecture health: " + root.health.alertReason
+            color: root.urgent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            wrapMode: Text.WordWrap
+          }
+        }
+
+        // A dimension with no evidence is shown as unknown, and says so.
+        Text {
+          width: parent.width
+          visible: root.health.security.score === null
+          text: "Security has no telemetry yet — a runtime reports it with "
+            + "`agent-pipeline signal --dimension security …`. It is never assumed to be 100."
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
+        }
+
         // ------------------------------------------------------- the graph
         Canvas {
           id: graph
@@ -413,6 +525,37 @@ Panel {
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           elide: Text.ElideRight
+        }
+
+        // ---------------------------------------------- runtime telemetry
+        Flow {
+          width: parent.width
+          spacing: Style.space(6)
+          visible: !!root.active && root.runtimeFacts.length > 0
+
+          Repeater {
+            model: root.runtimeFacts
+
+            Row {
+              required property var modelData
+              spacing: Style.space(3)
+
+              Text {
+                text: modelData.label
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              Text {
+                text: modelData.value
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+              }
+            }
+          }
         }
 
         // --------------------------------------------------------- problems
