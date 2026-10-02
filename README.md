@@ -33,6 +33,9 @@ The panel draws the agent's architecture as a **graph**, not a list:
   runtime draws, and the UI is English throughout;
 - above the graph, **architecture health** — stability / robustness / security
   scores with a one-line alert when one slips;
+- a **window summary** — runs, success rate, spend, cache hit rate, median latency,
+  rate and recency — and an **outcome strip** of the last runs;
+- a **trend sparkline** inside each gauge, oldest to newest, with the sample size `n`;
 - under the run, every **runtime fact** it recorded: duration, tokens in/out/cache,
   cost, cache hit rate, throughput, tool calls, api calls, retries, fallbacks,
   errors, and the provider/model.
@@ -71,6 +74,20 @@ Signals are the runtime's own observations — the only way the widget can know
 what it cannot see (a human gate that was skipped, a sandbox violation, a stealth
 exception). A signal's default penalty comes from its `kind`; pass `--weight N` to
 override it for one signal.
+
+## The window, not just one run
+
+A score is a current value. The panel also summarises the whole window, so both
+the direction and the cost are visible:
+
+- a **headline** — `runs 19 · ok 100% · cost $0.044 · per run $0.0023 · cache 96% · median 1.9m · rate 8/h · today 20 · last 2m ago`;
+- an **outcome strip** — the last runs, oldest on the left, coloured by result, so a cluster of failures is visible before reading any number;
+- a **trend sparkline** in each gauge (one bar per settled run) and the sample size `n`;
+- deeper lines, only when there is something to say: where the time went (`time: tools 38% · model 62%`), waiting-on-human, provider errors, security coverage (`security reported 0/19` — why the score is `n/a`), recurring problems, and the model mix.
+
+Every figure is derived from recorded fields. A field that is absent is hidden,
+never shown as a zero, and `n` is always visible so a score built on two runs is
+not mistaken for a trend.
 
 ## How it gets data
 

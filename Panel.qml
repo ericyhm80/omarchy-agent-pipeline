@@ -68,8 +68,13 @@ Panel {
   // Architecture health: stability / robustness / security over the recent
   // window, plus every runtime fact the selected run recorded.
   readonly property var health: Model.computeHealth(requests)
-  readonly property var healthRows: Model.healthRows(health)
+  readonly property var healthSeries: Model.scoreSeries(requests)
+  readonly property var healthRows: Model.healthRows(health, healthSeries)
   readonly property var runtimeFacts: Model.runtimeFacts(active)
+  readonly property var windowStats: Model.windowStats(requests)
+  readonly property var headlineFacts: Model.headlineFacts(windowStats)
+  readonly property var windowLines: Model.windowLines(windowStats)
+  readonly property var outcomeStrip: windowStats ? windowStats.outcomeStrip : []
 
   function refresh() {
     dataView.reload()
@@ -186,7 +191,7 @@ Panel {
     centerOnBar: true
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(580))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(720))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(920))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -276,6 +281,7 @@ Panel {
               required property var modelData
               readonly property color scoreColor: root.healthColor(modelData.level)
               readonly property real frac: modelData.score === null ? 0 : modelData.score / 100
+              readonly property var bars: modelData.bars || []
 
               width: (parent.width - 2 * Style.space(8)) / 3
               height: gaugeCol.implicitHeight + Style.space(16)
@@ -294,7 +300,7 @@ Panel {
                 spacing: Style.space(3)
 
                 Text {
-                  text: modelData.label
+                  text: modelData.label + (modelData.coverage > 0 ? "  n=" + modelData.coverage : "")
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.caption
@@ -319,6 +325,29 @@ Panel {
                     height: parent.height
                     radius: 1.5
                     color: gauge.scoreColor
+                  }
+                }
+
+                // per-run trend, oldest (left) to newest (right)
+                Row {
+                  id: spark
+                  width: parent.width
+                  height: 9
+                  spacing: 1
+                  visible: gauge.bars.length > 1
+
+                  Repeater {
+                    model: gauge.bars
+
+                    Rectangle {
+                      required property var modelData
+                      width: Math.max(1, (spark.width - (gauge.bars.length - 1)) / Math.max(1, gauge.bars.length))
+                      height: Math.max(2, Math.round(spark.height * modelData.frac))
+                      y: spark.height - height
+                      radius: 1
+                      color: root.healthColor(modelData.level)
+                      opacity: modelData.level === "unknown" ? 0.2 : 1
+                    }
                   }
                 }
               }
@@ -359,6 +388,77 @@ Panel {
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
+        }
+
+        // --------------------------------------------- window summary
+        // The whole window in one breath: volume, success, money, cache, latency.
+        Flow {
+          width: parent.width
+          visible: root.headlineFacts.length > 0
+          spacing: Style.space(10)
+
+          Repeater {
+            model: root.headlineFacts
+
+            Row {
+              required property var modelData
+              spacing: Style.space(3)
+
+              Text {
+                text: modelData.label
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+
+              Text {
+                text: modelData.value
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+              }
+            }
+          }
+        }
+
+        // Outcome strip: the last runs, oldest on the left, coloured by result,
+        // so a cluster of failures is visible before reading a single number.
+        Row {
+          width: parent.width
+          height: 12
+          spacing: 2
+          visible: root.outcomeStrip.length > 1
+
+          Repeater {
+            model: root.outcomeStrip
+
+            Rectangle {
+              required property var modelData
+              width: Math.max(3, Math.min(18, (parent.width - (root.outcomeStrip.length - 1) * 2) / Math.max(1, root.outcomeStrip.length)))
+              height: parent.height
+              radius: 2
+              color: modelData.level === "error" ? root.urgent
+                : (modelData.level === "warn" || modelData.level === "wait" || modelData.level === "run") ? root.accent
+                : root.withAlpha(root.foreground, 0.5)
+              opacity: modelData.level === "ok" ? 0.55 : 1
+            }
+          }
+        }
+
+        // Deeper window facts, one line each; a line with nothing to say is gone.
+        Repeater {
+          model: root.windowLines
+
+          Text {
+            required property var modelData
+            width: column.width
+            text: modelData
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
+          }
         }
 
         // ------------------------------------------------------- the graph

@@ -29,6 +29,21 @@ BarWidget {
   // Architecture health, so the glyph can turn urgent before a score is low.
   readonly property var health: Model.computeHealth(requests)
   readonly property bool healthAlert: health.alert === true
+  readonly property var windowStats: Model.windowStats(requests)
+  // The weakest scored dimension, security first on a tie — it is the one that
+  // must never slip. null when nothing has been scored yet.
+  readonly property var worstDim: {
+    var order = ["security", "stability", "robustness"]
+    var letter = { security: "Sec", stability: "S", robustness: "R" }
+    var best = null
+    for (var i = 0; i < order.length; i++) {
+      var d = health[order[i]]
+      if (d.score === null) continue
+      if (best === null || d.score < best.score)
+        best = { key: order[i], letter: letter[order[i]], score: d.score, level: d.level }
+    }
+    return best
+  }
   readonly property bool busy: running > 0 || (!!latest && String(latest.state) === "running")
 
   function reload() {
@@ -43,14 +58,30 @@ BarWidget {
     var scores = "S " + Model.fmtScore(health.stability.score)
       + " · R " + Model.fmtScore(health.robustness.score)
       + " · Sec " + Model.fmtScore(health.security.score)
-    if (!latest) return "Agent pipeline — " + scores + " (no requests yet)"
+
+    // The window in short, and the weakest dimension, so hovering answers
+    // both "how has it been?" and "what is wrong?" without opening the panel.
+    var s = windowStats
+    var win = []
+    if (s.settled) {
+      win.push(s.settled + " runs")
+      if (s.successRate !== null) win.push(s.successRate + "% ok")
+      var c = Model.fmtCost(s.totalCost); if (c !== "") win.push(c)
+      if (s.cacheHitPct !== null) win.push("cache " + s.cacheHitPct + "%")
+      if (s.medianMs) win.push("median " + Model.fmtMs(s.medianMs))
+      var age = Model.ageLabel(s.lastAgeMs); if (age !== "") win.push(age)
+    }
+    var lines = [scores]
+    if (win.length) lines.push(win.join(" · "))
+    if (worstDim && worstDim.level !== "good") lines.push("weak: " + worstDim.letter + " " + worstDim.score)
+
+    if (!latest) return "Agent pipeline — " + lines.join("  |  ") + " (no requests yet)"
     var parts = [String(latest.state || "").toUpperCase()]
     if (latest.title) parts.push(String(latest.title))
     if (latest.taskClass) parts.push(String(latest.taskClass))
     if (latest.model) parts.push(String(latest.model))
     if (running > 0) parts.push(running + " running")
-    parts.push(scores)
-    return parts.join(" · ")
+    return parts.join(" · ") + "\n" + lines.join("\n")
   }
 
   // ---- Panel shape contract (Bar.findPanelWidget requires these on the root)

@@ -405,12 +405,18 @@ function computeHealth(requests, window) {
   }
 }
 
-function healthRows(health) {
-  return [
-    { key: "stability",  label: "STABILITY",  score: health.stability.score,  level: health.stability.level,  coverage: health.stability.coverage },
-    { key: "robustness", label: "ROBUSTNESS", score: health.robustness.score, level: health.robustness.level, coverage: health.robustness.coverage },
-    { key: "security",   label: "SECURITY",   score: health.security.score,   level: health.security.level,   coverage: health.security.coverage }
-  ]
+function healthRows(health, series) {
+  var keys = ["stability", "robustness", "security"]
+  var labels = { stability: "STABILITY", robustness: "ROBUSTNESS", security: "SECURITY" }
+  var out = []
+  for (var i = 0; i < keys.length; i++) {
+    var k = keys[i], dim = health[k]
+    out.push({
+      key: k, label: labels[k], score: dim.score, level: dim.level, coverage: dim.coverage,
+      bars: (series && series[k]) ? sparkBars(series[k]) : []
+    })
+  }
+  return out
 }
 
 function healthColorKey(level) {
@@ -478,6 +484,278 @@ function runtimeFacts(request) {
   return out
 }
 
+// ======================================================= window analytics ==
+// One run is a story; the window is the health of the whole system. Everything
+// here is derived from recorded fields — when a field is absent the result is
+// null/empty and the UI says n/a or hides the line, never a fabricated zero.
+
+function num(v) { var n = Number(v); return isFinite(n) ? n : 0 }
+
+function isSettled(request) {
+  var s = String((request && request.state) || "")
+  if (s === "done" || s === "error") return true
+  return num(request && request.durationMs) > 0
+}
+
+var WAITING_STATES = ["waiting", "waiting_human", "waiting-human", "waiting_on_human", "paused", "blocked"]
+function isWaiting(request) {
+  return WAITING_STATES.indexOf(String((request && request.state) || "").toLowerCase()) >= 0
+}
+
+function parseTime(iso) { var t = Date.parse(String(iso || "")); return isNaN(t) ? null : t }
+
+function ageLabel(ms) {
+  if (ms === null || ms === undefined || !isFinite(ms) || ms < 0) return ""
+  var s = ms / 1000
+  if (s < 60) return Math.round(s) + "s ago"
+  if (s < 3600) return Math.round(s / 60) + "m ago"
+  if (s < 86400) return (s / 3600).toFixed(1) + "h ago"
+  return Math.round(s / 86400) + "d ago"
+}
+
+function medianOf(arr) {
+  if (!arr.length) return null
+  var a = arr.slice().sort(function(x, y) { return x - y })
+  var m = Math.floor(a.length / 2)
+  return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2
+}
+
+function addCount(bag, key, label) {
+  var row = bag[key] || (bag[key] = { key: key, label: label, count: 0 })
+  row.count += 1
+}
+
+function sortedByCount(bag) {
+  var out = []
+  for (var k in bag) if (Object.prototype.hasOwnProperty.call(bag, k)) out.push(bag[k])
+  out.sort(function(a, b) { return b.count - a.count })
+  return out
+}
+
+function sortedByMs(bag) {
+  var out = []
+  for (var k in bag) if (Object.prototype.hasOwnProperty.call(bag, k)) out.push(bag[k])
+  out.sort(function(a, b) { return b.ms - a.ms })
+  return out
+}
+
+// Everything the window can tell us, in one plain object the UI can render.
+function windowStats(requests, window) {
+  var w = window || HEALTH.window
+  var rows = (requests || []).slice(0, w)
+  var now = Date.now()
+  var today = new Date(now); today.setHours(0, 0, 0, 0)
+
+  var settled = 0, done = 0, error = 0, running = 0, waiting = 0
+  var cost = 0, tin = 0, tout = 0, tcr = 0
+  var durs = []
+  var problemBag = {}, modelBag = {}, stageBag = {}
+  var secReported = 0, providerErrors = 0, lastProviderErrorAt = ""
+  var oldestWaitMs = null, lastAt = "", firstAt = "", todayCount = 0
+
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i] || {}
+    var state = String(r.state || "").toLowerCase()
+    var t = r.tokens || {}, m = r.metrics || {}, e = r.env || {}
+    var at = parseTime(r.at)
+
+    if (at !== null) {
+      if (!lastAt || at > parseTime(lastAt)) lastAt = String(r.at || "")
+      if (!firstAt || at < parseTime(firstAt)) firstAt = String(r.at || "")
+      if (at >= today.getTime()) todayCount++
+    }
+    if (state === "running") running++
+    if (isWaiting(r)) {
+      waiting++
+      if (at !== null) { var waitMs = now - at; if (oldestWaitMs === null || waitMs > oldestWaitMs) oldestWaitMs = waitMs }
+    }
+
+    if (isSettled(r)) {
+      settled++
+      if (state === "done") done++
+      else if (state === "error") error++
+      cost += num(t.costUsd)
+      tin += num(t.input); tout += num(t.output); tcr += num(t.cacheRead)
+      var d = num(r.durationMs); if (d > 0) durs.push(d)
+
+      var mdl = String(r.model || e.model || "")
+      if (mdl) {
+        var mb = modelBag[mdl] || (modelBag[mdl] = { key: mdl, count: 0, cost: 0 })
+        mb.count++; mb.cost += num(t.costUsd)
+      }
+
+      var nodes = r.nodes || []
+      for (var n = 0; n < nodes.length; n++) {
+        var nms = num((nodes[n] || {}).ms)
+        if (nms > 0) {
+          var nid = String(nodes[n].id || "?")
+          var sb = stageBag[nid] || (stageBag[nid] = { id: nid, ms: 0, share: 0 })
+          sb.ms += nms
+        }
+        var nst = String((nodes[n] || {}).status || "")
+        if (nst === "error" || nst === "failed") addCount(problemBag, "stage-failed", "failed stages")
+      }
+
+      var iss = r.issues || []
+      for (var j = 0; j < iss.length; j++) {
+        var lvl = String((iss[j] || {}).level || "")
+        if (lvl === "warn" || lvl === "error") addCount(problemBag, "issue-" + lvl, lvl + " issues")
+      }
+    }
+
+    // signals are the runtime's own observations; count them and the security
+    // coverage (how many settled runs reported anything about security)
+    var sigs = r.signals || []
+    var hasSec = false
+    var rowProvErr = num(m.errors)
+    for (var g = 0; g < sigs.length; g++) {
+      var sg = sigs[g] || {}
+      var dim = String(sg.dimension || "")
+      var slvl = String(sg.level || "")
+      if (dim === "security") hasSec = true
+      if (slvl === "warn" || slvl === "error") addCount(problemBag, "sig-" + String(sg.kind || "custom"), labelFor(String(sg.kind || "custom")))
+      if (dim === "stability" && (sg.kind === "provider_outage" || sg.kind === "rate_limit" || sg.kind === "model_error")) {
+        if (rowProvErr === 0) rowProvErr++
+      }
+    }
+    if (hasSec && isSettled(r)) secReported++
+    if (rowProvErr > 0) {
+      providerErrors += rowProvErr
+      if (at !== null && (lastProviderErrorAt === "" || at > parseTime(lastProviderErrorAt))) lastProviderErrorAt = String(r.at || "")
+    }
+  }
+
+  // outcome strip, oldest on the left, so the shape of the window is visible
+  var strip = []
+  for (var s2 = rows.length - 1; s2 >= 0; s2--) {
+    var rr = rows[s2] || {}
+    var sst = String(rr.state || "").toLowerCase()
+    var out = "ok"
+    if (sst === "error") out = "error"
+    else if (isWaiting(rr)) out = "wait"
+    else if (sst === "running") out = "run"
+    else {
+      var warn = false
+      var ii = rr.issues || []
+      for (var x = 0; x < ii.length; x++) if (String((ii[x] || {}).level || "") !== "info") warn = true
+      var ss = rr.signals || []
+      for (var y = 0; y < ss.length; y++) { var L = String((ss[y] || {}).level || ""); if (L === "warn" || L === "error") warn = true }
+      var nn = rr.nodes || []
+      for (var z = 0; z < nn.length; z++) { var NS = String((nn[z] || {}).status || ""); if (NS === "error" || NS === "failed" || NS === "warn") warn = true }
+      if (warn) out = "warn"
+    }
+    strip.push({ level: out })
+  }
+
+  var stages = sortedByMs(stageBag)
+  var stageTotal = 0
+  for (var p = 0; p < stages.length; p++) stageTotal += stages[p].ms
+  for (var q = 0; q < stages.length; q++) stages[q].share = stageTotal > 0 ? Math.round(100 * stages[q].ms / stageTotal) : 0
+
+  var spanMs = (lastAt && firstAt) ? (parseTime(lastAt) - parseTime(firstAt)) : 0
+  var runsPerHour = spanMs > 60000 ? Math.round(10 * rows.length / (spanMs / 3600000)) / 10 : null
+  var lastAgeMs = lastAt ? now - parseTime(lastAt) : null
+
+  return {
+    window: w, considered: rows.length, settled: settled,
+    done: done, error: error, running: running, waiting: waiting,
+    successRate: settled ? Math.round(100 * done / settled) : null,
+    totalCost: cost, avgCost: settled ? cost / settled : null,
+    tokens: { input: tin, output: tout, cacheRead: tcr },
+    cacheHitPct: (tcr + tin) > 0 ? Math.round(100 * tcr / (tcr + tin)) : null,
+    medianMs: medianOf(durs), slowestMs: durs.length ? Math.max.apply(null, durs) : null,
+    fastestMs: durs.length ? Math.min.apply(null, durs) : null,
+    runsPerHour: runsPerHour, spanMs: spanMs,
+    lastAt: lastAt, lastAgeMs: lastAgeMs, todayCount: todayCount,
+    problems: sortedByCount(problemBag),
+    modelMix: sortedByCount(modelBag),
+    stages: stages,
+    securityReported: secReported,
+    providerErrors: providerErrors, lastProviderErrorAt: lastProviderErrorAt,
+    outcomeStrip: strip
+  }
+}
+
+// The headline: volume, success, money, cache, latency, recency — as many
+// label/value facts as the window can honestly support.
+function headlineFacts(stats) {
+  if (!stats || !stats.settled) return []
+  var out = []
+  out.push({ label: "runs", value: String(stats.settled) })
+  if (stats.successRate !== null) out.push({ label: "ok", value: stats.successRate + "%" })
+  var c = fmtCost(stats.totalCost); if (c !== "") out.push({ label: "cost", value: c })
+  var pc = fmtCost(stats.avgCost); if (pc !== "") out.push({ label: "per run", value: pc })
+  if (stats.cacheHitPct !== null) out.push({ label: "cache", value: stats.cacheHitPct + "%" })
+  if (stats.medianMs) out.push({ label: "median", value: fmtMs(stats.medianMs) })
+  if (stats.runsPerHour !== null) out.push({ label: "rate", value: stats.runsPerHour + "/h" })
+  if (stats.todayCount) out.push({ label: "today", value: String(stats.todayCount) })
+  var age = ageLabel(stats.lastAgeMs); if (age !== "") out.push({ label: "last", value: age })
+  return out
+}
+
+// Deeper window facts, one line each. A line with nothing to say is not emitted.
+function windowLines(stats) {
+  if (!stats) return []
+  var lines = []
+
+  if (stats.stages && stats.stages.length) {
+    var parts = []
+    for (var i = 0; i < Math.min(3, stats.stages.length); i++) parts.push(stats.stages[i].id + " " + stats.stages[i].share + "%")
+    lines.push("time: " + parts.join("  ·  "))
+  }
+
+  var g = []
+  if (stats.waiting) g.push("waiting on human " + stats.waiting + (stats.oldestWaitMs !== null ? " (" + ageLabel(stats.oldestWaitMs).replace(" ago", "") + ")" : ""))
+  if (stats.providerErrors) g.push("provider errors " + stats.providerErrors)
+  g.push("security reported " + stats.securityReported + "/" + stats.settled)
+  lines.push(g.join("  ·  "))
+
+  if (stats.problems && stats.problems.length) {
+    var pp = []
+    for (var j = 0; j < Math.min(4, stats.problems.length); j++) pp.push(stats.problems[j].label + " ×" + stats.problems[j].count)
+    lines.push("problems: " + pp.join(", "))
+  }
+
+  if (stats.modelMix && stats.modelMix.length) {
+    var mm = []
+    for (var k = 0; k < Math.min(3, stats.modelMix.length); k++) {
+      var row = stats.modelMix[k]
+      var c = fmtCost(row.cost)
+      mm.push(row.key + " ×" + row.count + (c !== "" ? " " + c : ""))
+    }
+    lines.push("models: " + mm.join("  ·  "))
+  }
+
+  return lines
+}
+
+// Per-settled-run scores, oldest to newest, for a trend sparkline. Each run is
+// scored on its own so the line shows direction, not just the current number.
+function scoreSeries(requests, window) {
+  var w = window || HEALTH.window
+  var rows = (requests || []).slice(0, w).filter(isSettled)
+  rows = rows.slice().reverse()
+  var out = { stability: [], robustness: [], security: [] }
+  for (var i = 0; i < rows.length; i++) {
+    var h = computeHealth([rows[i]], 1)
+    out.stability.push(h.stability.score)
+    out.robustness.push(h.robustness.score)
+    out.security.push(h.security.score)
+  }
+  return out
+}
+
+// Sparkline bars: a fraction to scale each bar, and the level to colour it.
+function sparkBars(values) {
+  var out = []
+  for (var i = 0; i < (values || []).length; i++) {
+    var v = values[i]
+    if (v === null || v === undefined) { out.push({ level: "unknown", frac: 0 }); continue }
+    out.push({ level: healthLevel(v), frac: Math.max(0.06, Math.min(1, v / 100)) })
+  }
+  return out
+}
+
 function shortClock(iso) {
   var d = new Date(String(iso || ""))
   if (isNaN(d.getTime())) return ""
@@ -490,6 +768,9 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     parse: parse, computeHealth: computeHealth, healthRows: healthRows,
     healthColorKey: healthColorKey, fmtScore: fmtScore, runtimeFacts: runtimeFacts,
-    cacheHitPct: cacheHitPct, tokensPerSec: tokensPerSec, HEALTH: HEALTH
+    cacheHitPct: cacheHitPct, tokensPerSec: tokensPerSec, HEALTH: HEALTH,
+    windowStats: windowStats, headlineFacts: headlineFacts, windowLines: windowLines,
+    scoreSeries: scoreSeries, sparkBars: sparkBars, ageLabel: ageLabel,
+    isSettled: isSettled, isWaiting: isWaiting, fmtMs: fmtMs, fmtCost: fmtCost, fmtTokens: fmtTokens
   }
 }

@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const modelPath = path.join(here, "..", "Model.js");
 let src = fs.readFileSync(modelPath, "utf8").replace(/^\.pragma library[^\n]*\n/, "");
-src += "\nexport { parse, computeHealth, healthRows, healthColorKey, fmtScore, runtimeFacts, cacheHitPct, tokensPerSec, HEALTH };\n";
+src += "\nexport { parse, computeHealth, healthRows, healthColorKey, fmtScore, runtimeFacts, cacheHitPct, tokensPerSec, HEALTH, windowStats, headlineFacts, windowLines, scoreSeries, sparkBars, ageLabel, isSettled, isWaiting };\n";
 const tmp = path.join(os.tmpdir(), `agent-pipeline-model-${process.pid}.mjs`);
 fs.writeFileSync(tmp, src);
 const Model = await import(`file://${tmp}?t=${Date.now()}`);
@@ -93,6 +93,39 @@ ok("three health rows", rows.length === 3 && rows[2].key === "security", JSON.st
 // parse rejects junk and never throws
 ok("parse tolerates junk", Model.parse("not json").invalid === true);
 ok("parse sorts newest first", Model.parse(JSON.stringify({ requests: [{ at: "2026-01-01" }, { at: "2026-02-01" }] })).requests[0].at === "2026-02-01");
+
+// ------------------------------------------------------ window analytics --
+const stats = Model.windowStats([
+  req({ state: "done", tokens: { input: 100, output: 50, cacheRead: 900, costUsd: 0.002 }, durationMs: 2000, model: "glm",
+        nodes: [{ id: "model", status: "ok", ms: 1800 }, { id: "tools", status: "ok", ms: 200 }] }),
+  req({ state: "error", tokens: { input: 10, cacheRead: 0, costUsd: 0.001 }, durationMs: 500, model: "glm",
+        nodes: [{ id: "model", status: "error", ms: 500 }] }),
+  req({ state: "waiting_human", durationMs: 0 })
+]);
+ok("window settled 2", stats.settled === 2, stats.settled);
+ok("window waiting 1", stats.waiting === 1, stats.waiting);
+ok("success rate 50%", stats.successRate === 50, stats.successRate);
+ok("total cost 0.003", Math.abs(stats.totalCost - 0.003) < 1e-9, stats.totalCost);
+ok("avg cost 0.0015", Math.abs(stats.avgCost - 0.0015) < 1e-9, stats.avgCost);
+ok("cache hit 89%", stats.cacheHitPct === 89, stats.cacheHitPct);
+ok("median duration 1250", stats.medianMs === 1250, stats.medianMs);
+ok("stage share model 92 / tools 8", stats.stages[0].id === "model" && stats.stages[0].share === 92 && stats.stages[1].share === 8, JSON.stringify(stats.stages));
+ok("model mix one model, 2 runs", stats.modelMix.length === 1 && stats.modelMix[0].count === 2, JSON.stringify(stats.modelMix));
+ok("failed stage counted", stats.problems.some((p) => p.key === "stage-failed" && p.count === 1), JSON.stringify(stats.problems));
+ok("strip oldest->newest", stats.outcomeStrip.map((s) => s.level).join(",") === "wait,error,ok", JSON.stringify(stats.outcomeStrip));
+ok("security not reported", stats.securityReported === 0, stats.securityReported);
+ok("headline has cost and cache", Model.headlineFacts(stats).some((f) => f.label === "cost") && Model.headlineFacts(stats).some((f) => f.label === "cache"));
+ok("window line names coverage", Model.windowLines(stats).some((l) => /security reported 0\/2/.test(l)), JSON.stringify(Model.windowLines(stats)));
+ok("provider errors summed", Model.windowStats([req({ metrics: { errors: 2 } })]).providerErrors === 2);
+ok("coverage counts a reported run", Model.windowStats([req({ signals: [{ dimension: "security", kind: "no_risk_detected", level: "info" }] })]).securityReported === 1);
+
+// score series is chronological (oldest first) even though input is newest first
+const ser = Model.scoreSeries([req({}), req({ state: "error" })]);
+ok("series chronological", ser.stability.join(",") === "75,100", ser.stability.join(","));
+const bars2 = Model.sparkBars([100, null, 60]);
+ok("spark bars shape", bars2.length === 3 && bars2[0].frac === 1 && bars2[1].level === "unknown" && bars2[2].level === "alert", JSON.stringify(bars2));
+ok("age label minutes", Model.ageLabel(120000) === "2m ago", Model.ageLabel(120000));
+ok("healthRows carry bars", Model.healthRows(Model.computeHealth([req({})]), ser)[0].bars.length === 2);
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

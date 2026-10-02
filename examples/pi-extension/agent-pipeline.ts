@@ -40,6 +40,8 @@ export default function (pi) {
   let startedAt = 0;
   let toolCalls = 0;
   let toolErrors = 0;
+  let toolMs = 0;
+  const toolStart = {};       // toolCallId -> start time, for per-tool duration
   let apiCalls = 0;
   let providerStatus = [];       // non-2xx statuses seen this run
   let risks = new Set();         // risk labels matched this run
@@ -61,6 +63,8 @@ export default function (pi) {
     startedAt = Date.now();
     toolCalls = 0;
     toolErrors = 0;
+    toolMs = 0;
+    for (const k in toolStart) delete toolStart[k];
     apiCalls = 0;
     providerStatus = [];
     risks = new Set();
@@ -117,6 +121,7 @@ export default function (pi) {
     toolCalls += 1;
     const toolName = String(event?.toolName ?? "tool");
     const args = event?.args ?? {};
+    if (event?.toolCallId !== undefined) toolStart[String(event.toolCallId)] = Date.now();
     if (toolName === "bash") {
       commands += 1;
       const label = scanCommand(args.command ?? args.cmd ?? "");
@@ -137,6 +142,8 @@ export default function (pi) {
 
   pi.on("tool_execution_end", async (event) => {
     if (!running) return;
+    var key = event?.toolCallId !== undefined ? String(event.toolCallId) : null;
+    if (key && toolStart[key]) { toolMs += Math.max(0, Date.now() - toolStart[key]); delete toolStart[key]; }
     if (!event?.isError) return;
     toolErrors += 1;
     await patch({
@@ -201,11 +208,11 @@ export default function (pi) {
       state: "done",
       durationMs,
       tokens,
-      metrics: { toolCalls, toolErrors, apiCalls, fallbacks: fallback ? 1 : 0, errors: providerStatus.length },
+      metrics: { toolCalls, toolErrors, toolMs, apiCalls, fallbacks: fallback ? 1 : 0, errors: providerStatus.length },
       nodes: [
         { id: "model", status: "ok", detail, ms: durationMs },
         { id: "tools", status: toolCalls ? (toolErrors ? "warn" : "ok") : "skipped",
-          detail: toolCalls ? toolCalls + " tool calls" + (toolErrors ? ", " + toolErrors + " failed" : "") : "no tools needed", ms: 0 },
+          detail: toolCalls ? toolCalls + " tool calls" + (toolErrors ? ", " + toolErrors + " failed" : "") : "no tools needed", ms: toolMs },
         { id: "verify", status: usage ? "ok" : "warn", detail: usage ? "usage captured" : "no usage captured", ms: 0 },
         { id: "output", status: "ok", detail: "returned to terminal", ms: 0 }
       ],
