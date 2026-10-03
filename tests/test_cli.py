@@ -54,9 +54,11 @@ def main() -> int:
             "--metrics-json", '{"retries":1}', "--env-json", '{"region":"cn"}')
         # signal on an unknown id must create the request, not crash
         run("signal", "--id", "R2", "--dimension", "security", "--kind", "no_risk_detected", "--level", "info")
-        run("jev-event", "--source", "token-router", "--status", "success", "--model", "jev-latest",
+        run("jev-event", "--source", "token-router", "--status", "success", "--model", "jev-1.13.0",
             "--latency-ms", "213.7", "--input-tokens", "566", "--output-tokens", "111",
-            "--task-class", "analysis", "--confidence", "0.91", "--agreement", "no")
+            "--task-class", "analysis", "--confidence", "0.91", "--agreement", "no",
+            "--project-id", "P1", "--cost-usd", "0.000023772", "--price-model", "jev-1.13.0",
+            "--input-usd-per-million", "0.042")
         run("jev-event", "--source", "model-router", "--status", "error", "--model", "jev-latest",
             "--latency-ms", "500", "--error-type", "TimeoutError")
         # a bad patch must be swallowed, never raise
@@ -75,16 +77,37 @@ def main() -> int:
         ok("state and duration set", r1["state"] == "done" and r1["durationMs"] == 8200.0, (r1["state"], r1.get("durationMs")))
         ok("unknown id auto-created", "signals" in rows["R2"] and len(rows["R2"]["signals"]) == 1)
         ok("no leftover temp file", not (store.parent / "requests.tmp").exists())
+
+        request_arch = {"nodes": [{"id": "input"}, {"id": "jev"}, {"id": "router"}],
+                        "edges": [{"from": "input", "to": "jev"},
+                                  {"from": "jev", "to": "router"}]}
+        run("patch", json.dumps({"id": "R4", "architecture": request_arch}))
+        run("node", "--id", "R4", "--node", "input", "--status", "ok")
+        run("node", "--id", "R4", "--node", "jev", "--status", "running",
+            "--detail", "TypeSafe request active")
+        rows_after_graph = {r["id"]: r for r in json.loads(store.read_text())["requests"]}
+        r4 = rows_after_graph["R4"]
+        ok("per-request graph is retained", r4.get("architecture") == request_arch)
+        ok("node writer traverses edges from the request-specific graph",
+           {tuple((e.get("from"), e.get("to"))) for e in r4.get("edges", [])}
+           == {("input", "jev")}, r4.get("edges"))
+        ok("live JEV stage is recorded as running without failing the request",
+           next(n for n in r4["nodes"] if n["id"] == "jev")["status"] == "running"
+           and r4["state"] == "running", r4)
+
         events = data.get("jevEvents", [])
         ok("JEV call events recorded across call sources", len(events) == 2 and
            {e.get("source") for e in events} == {"token-router", "model-router"}, events)
         ok("JEV event retains outcome and usage metadata", events[0].get("status") == "success" and
            events[0].get("inputTokens") == 566 and events[0].get("outputTokens") == 111 and
-           events[0].get("agreement") is False, events[0] if events else events)
+           events[0].get("agreement") is False and events[0].get("projectId") == "P1",
+           events[0] if events else events)
         ok("JEV event contains no prompt, raw input, key, or state fields", all(
             key.lower() not in {"prompt", "input", "api_key", "apikey", "key", "state"}
             for event in events for key in event), events)
-        ok("JEV event has no fabricated cost", all("costUsd" not in event and "cost" not in event for event in events))
+        ok("JEV event records only the supplied, model-versioned cost", events[0].get("costUsd") == 0.000023772
+           and events[0].get("priceModel") == "jev-1.13.0" and events[0].get("inputUsdPerMillion") == 0.042
+           and "costUsd" not in events[1], events)
 
         # ---- tool FACTS + the reconcile command that can reconstruct them -----
         def reload() -> dict:

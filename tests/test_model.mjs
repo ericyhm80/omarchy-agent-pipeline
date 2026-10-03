@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const modelPath = path.join(here, "..", "Model.js");
 let src = fs.readFileSync(modelPath, "utf8").replace(/^\.pragma library[^\n]*\n/, "");
-src += "\nexport { parse, computeHealth, healthRows, healthColorKey, fmtScore, runtimeFacts, cacheHitPct, tokensPerSec, HEALTH, windowStats, headlineFacts, windowLines, scoreSeries, sparkBars, ageLabel, isSettled, isWaiting, instrumentStatus, jevStats };\n";
+src += "\nexport { parse, computeHealth, healthRows, healthColorKey, fmtScore, fmtCost, runtimeFacts, cacheHitPct, tokensPerSec, HEALTH, windowStats, headlineFacts, windowLines, scoreSeries, sparkBars, ageLabel, isSettled, isWaiting, instrumentStatus, jevStats, architectureFor, edgeTraversed };\n";
 const tmp = path.join(os.tmpdir(), `agent-pipeline-model-${process.pid}.mjs`);
 fs.writeFileSync(tmp, src);
 const Model = await import(`file://${tmp}?t=${Date.now()}`);
@@ -25,7 +25,8 @@ function ok(name, cond, extra) {
 const req = (o) => Object.assign({ id: "r", at: "2026-10-02T00:00:00Z", state: "done", durationMs: 1000 }, o);
 
 const jevPayload = Model.parse(JSON.stringify({ requests: [], jevEvents: [
-  { source: "token-router", status: "success", inputTokens: 566, outputTokens: 111, latencyMs: 200 },
+  { source: "token-router", status: "success", inputTokens: 566, outputTokens: 111,
+    costUsd: 0.000023772, priceModel: "jev-1.13.0", latencyMs: 200 },
   { source: "model-router", status: "error", latencyMs: 600 },
 ] }));
 const jevSummary = Model.jevStats(jevPayload.jevEvents);
@@ -34,9 +35,12 @@ ok("JEV global stats distinguish successful and failed API calls", jevSummary.ca
    jevSummary.success === 1 && jevSummary.failed === 1, JSON.stringify(jevSummary));
 ok("JEV global stats break down both participating code paths", jevSummary.tokenRouter === 1 &&
    jevSummary.modelRouter === 1, JSON.stringify(jevSummary));
-ok("JEV usage and mean latency are aggregated without inventing money", jevSummary.usageReported === 1 &&
+ok("JEV usage, priced cost and mean latency aggregate with partial-cost coverage", jevSummary.usageReported === 1 &&
    jevSummary.inputTokens === 566 && jevSummary.outputTokens === 111 && jevSummary.avgMs === 400 &&
-   !("costUsd" in jevSummary), JSON.stringify(jevSummary));
+   jevSummary.costReported === 1 && Math.abs(jevSummary.costUsd - 0.000023772) < 1e-12,
+   JSON.stringify(jevSummary));
+ok("sub-cent cost formatting does not round a real JEV charge to zero", Model.fmtCost(0.000023772) === "$0.000024");
+ok("sub-micro-dollar cost formatting uses a truthful upper bound", Model.fmtCost(0.00000042) === "<$0.000001");
 
 // a settled, clean run: stability/robustness 100, security has no evidence -> null
 let h = Model.computeHealth([req({})]);
@@ -44,6 +48,9 @@ ok("clean run stability 100", h.stability.score === 100, h.stability.score);
 ok("clean run robustness 100", h.robustness.score === 100, h.robustness.score);
 ok("security unknown without telemetry", h.security.score === null && h.security.level === "unknown", h.security.score);
 ok("no alert on a clean window", h.alert === false, h.alertReason);
+h = Model.computeHealth([req({ nodes: [{ id: "jev", status: "warn", detail: "rules fallback" }] })]);
+ok("JEV availability warning is visible but does not alter health scores",
+   h.stability.score === 100 && h.robustness.score === 100, JSON.stringify(h));
 
 // one errored run is "watch", not "alert"
 h = Model.computeHealth([req({ state: "error" })]);
@@ -176,6 +183,20 @@ const map = Object.fromEntries(facts.map((f) => [f.label, f.value]));
 ok("cache hit 90%", map["cache hit"] === "90%", map["cache hit"]);
 ok("throughput 500 tok/s", map["tok/s"] === "500", map["tok/s"]);
 ok("tool count shown", map["tools"] === "3", map.tools);
+const jevFacts = Object.fromEntries(Model.runtimeFacts(req({ metrics: { jev: {
+  enabled: true, attempted: true, status: "success", source: "jev", model: "jev-1.13.0",
+  taskClass: "strategy", latencyMs: 214, inputTokens: 566, outputTokens: 111,
+  costUsd: 0.000023772
+} } })).map((f) => [f.label, f.value]));
+ok("per-request runtime facts identify JEV use, model, class, tokens and priced cost",
+   jevFacts.JEV === "success · used" && jevFacts["JEV model"] === "jev-1.13.0"
+   && jevFacts["JEV class"] === "strategy" && jevFacts["JEV tokens"] === "566 in / 111 out"
+   && jevFacts["JEV cost"] === "$0.000024", JSON.stringify(jevFacts));
+const jevUnknownFacts = Object.fromEntries(Model.runtimeFacts(req({ metrics: { jev: {
+  attempted: true, status: "error", source: "rules", costUsd: null
+} } })).map((f) => [f.label, f.value]));
+ok("attempted JEV call without a versioned price is displayed as unknown, never zero",
+   jevUnknownFacts["JEV cost"] === "unknown", JSON.stringify(jevUnknownFacts));
 
 // healthRows shape mirrors the three dimensions
 const rows = Model.healthRows(Model.computeHealth([req({})]));
@@ -184,6 +205,14 @@ ok("three health rows", rows.length === 3 && rows[2].key === "security", JSON.st
 // parse rejects junk and never throws
 ok("parse tolerates junk", Model.parse("not json").invalid === true);
 ok("parse sorts newest first", Model.parse(JSON.stringify({ requests: [{ at: "2026-01-01" }, { at: "2026-02-01" }] })).requests[0].at === "2026-02-01");
+const requestGraph = { nodes: [{ id: "input" }, { id: "jev" }, { id: "router" }],
+                      edges: [{ from: "input", to: "jev" }, { from: "jev", to: "router" }] };
+const graphData = Model.parse(JSON.stringify({ requests: [req({ architecture: requestGraph,
+  edges: [{ from: "input", to: "jev" }] })] }));
+ok("per-request JEV workflow graph overrides the shared graph",
+   Model.architectureFor(graphData, graphData.requests[0]).nodes.some((n) => n.id === "jev"));
+ok("the active input-to-JEV edge is read from the request facts",
+   Model.edgeTraversed(graphData.requests[0], "input", "jev"));
 
 // ------------------------------------------------------ window analytics --
 const stats = Model.windowStats([

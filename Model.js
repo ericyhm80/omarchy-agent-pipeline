@@ -137,11 +137,12 @@ function nodeSubtitle(node) {
 }
 
 // JEV attempts are global provider facts, separate from pipeline health scores.
-// The writer keeps only the newest 200 and never records prompts, keys, or prices.
+// The writer keeps only the newest 200; cost is present only with a versioned rate.
 function jevStats(events) {
   var rows = Array.isArray(events) ? events.slice(-200) : []
   var out = { calls: rows.length, success: 0, failed: 0, usageReported: 0,
-              inputTokens: 0, outputTokens: 0, tokenRouter: 0, modelRouter: 0, avgMs: null }
+              inputTokens: 0, outputTokens: 0, costReported: 0, costUsd: 0,
+              tokenRouter: 0, modelRouter: 0, avgMs: null }
   var totalMs = 0, timed = 0
   for (var i = 0; i < rows.length; i++) {
     var e = rows[i] || {}
@@ -153,6 +154,10 @@ function jevStats(events) {
     if (e.inputTokens !== undefined || e.outputTokens !== undefined) out.usageReported++
     out.inputTokens += Math.max(0, num(e.inputTokens))
     out.outputTokens += Math.max(0, num(e.outputTokens))
+    if (e.costUsd !== undefined && isFinite(Number(e.costUsd)) && Number(e.costUsd) >= 0) {
+      out.costReported++
+      out.costUsd += Number(e.costUsd)
+    }
     var ms = num(e.latencyMs)
     if (ms > 0) { totalMs += ms; timed++ }
   }
@@ -278,6 +283,8 @@ function fmtTokens(n) {
 function fmtCost(usd) {
   var v = Number(usd || 0)
   if (!isFinite(v) || v <= 0) return ""
+  if (v < 0.000001) return "<$0.000001"
+  if (v < 0.0001) return "$" + v.toFixed(6)
   if (v < 0.01) return "$" + v.toFixed(4)
   return "$" + v.toFixed(3)
 }
@@ -629,6 +636,20 @@ function runtimeFacts(request) {
   add("retries", m.retries)
   add("fallbacks", m.fallbacks)
   add("errors", m.errors)
+  var j = m.jev
+  if (j && typeof j === "object") {
+    add("JEV", String(j.status || "unknown") + (j.source === "jev" ? " · used" : " · rules fallback"))
+    add("JEV model", j.model)
+    add("JEV class", j.taskClass)
+    add("JEV ms", fmtMs(j.latencyMs))
+    if (j.inputTokens !== undefined || j.outputTokens !== undefined)
+      add("JEV tokens", fmtTokens(j.inputTokens) + " in / " + fmtTokens(j.outputTokens) + " out")
+    if (j.attempted) {
+      var jc = Number(j.costUsd)
+      add("JEV cost", j.costUsd !== undefined && j.costUsd !== null
+        && isFinite(jc) && jc >= 0 ? (fmtCost(jc) || "$0") : "unknown")
+    }
+  }
   var probs = problemCount(request)
   if (probs) add("issues", probs)
   return out

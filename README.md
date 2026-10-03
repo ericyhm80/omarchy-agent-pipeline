@@ -1,8 +1,9 @@
 # Agent Pipeline — see what your AI agent is actually doing
 
-**0.7.5:** privacy-minimal JEV API telemetry (latest 200 attempts, usage/latency,
-source and outcome) plus per-request router provenance; it is observational only and
-never changes health scores. TypeSafe usage currently omits price, shown as unknown.
+**0.7.7:** privacy-minimal JEV API telemetry (latest 200 attempts, usage/latency,
+source, outcome and version-matched cost) plus per-request router provenance; it is
+observational only and never changes health scores. Unknown versions/usages remain
+explicitly unpriced.
 
 An Omarchy bar widget that renders **one pipeline per agent request**: how the
 request was classified, which model tier it was routed to, what memory was
@@ -40,11 +41,13 @@ The panel draws the agent's architecture as a **graph**, not a list:
 - a **window summary** — runs, success rate, spend, cache hit rate, median latency,
   rate and recency — and an **outcome strip** of the last runs;
 - a separate **JEV API summary** for the latest up to 200 external attempts across
-  `token-router` and `model-router`: successes/failures, returned usage tokens and
-  average latency. It records no prompts, API keys, or provider error text; TypeSafe
-  does not return cost in the observed usage payload, so the panel says cost was not
-  returned rather than displaying a fabricated zero. JEV telemetry never changes
-  architecture health scores;
+  `token-router` and `model-router`: successes/failures, returned usage tokens,
+  average latency and cost coverage. It records no prompts, API keys, or provider
+  error text. Since the API returns usage but not a price, cost is calculated only
+  when the response's version has a matching official published rate (Jev 1.13:
+  $0.042/M input tokens, output free; https://docs.typesafe.ai/models); unknown cases
+  are marked unpriced, never zero. JEV telemetry never changes architecture health
+  scores;
 - a **trend sparkline** inside each gauge, oldest to newest, with the sample size `n`;
 - under the run, every **runtime fact** it recorded: duration, tokens in/out/cache,
   cost, cache hit rate, throughput, tool calls, api calls, retries, fallbacks,
@@ -65,12 +68,17 @@ System One API attempt observed after this telemetry was installed. The bounded
 `jevEvents` list retains the newest 200 records, including source (`token-router` /
 `model-router`), result, model, elapsed
 time, and token usage only when the provider reports it. Disabled routing and
-missing credentials are not counted as external calls. Each company-web request's
-router node separately states whether JEV actually classified the request or
-whether deterministic rules supplied the fallback. This telemetry is independent
-of the company's monetary budget ledger: because the currently observed JEV API
-response reports tokens but no price, the dashboard explicitly labels cost as not
-returned; it must not be interpreted as free or as budget-accounted.
+missing credentials are not counted as external calls. In the company-web workflow, the base graph is `Input → Rules → Route` and contains
+no JEV node. A JEV branch is inserted only after budget authorization and immediately
+before TypeSafe I/O. If a valid JEV classification is used, Rules and JEV both feed
+Route; if the call fails or its result is unused, the attempted JEV node is a warning
+and Rules is the Route fallback. Disabled, unconfigured, unavailable, or budget-denied
+requests show no JEV node or per-request JEV metrics. Its caption contains only model/class, latency, reported usage,
+and version-priced cost; never the prompt, key, or raw provider error. The following
+Route node shows the selected policy/model. This per-request graph is distinct from
+the global `jevEvents` summary. Cost is calculated only from the version-matched official
+input-token rate; unknown versions/usages remain unpriced and fail closed in the
+company's budget gate.
 
 ## Architecture health
 
@@ -312,11 +320,36 @@ one, press **↑/↓** or click a row under RECENT: the graph and the summary sw
 header shows `viewing 3/7`, and clicking the same row again (or pressing ↑ back to the top)
 returns to the newest. The newest run keeps recording while you inspect, so nothing is lost.
 
-## Who reports
+## Runtime coverage and who reports
 
-Anything can report: a host that runs agents (a console, a CI job, a script) simply writes the JSON
-above, and the widget shows it — that is how the web console and this repo's own `agent-pipeline`
-CLI work. Two small conventions keep the picture clean:
+**This is not an agent auto-discovery service.** Installing the plugin does not watch
+processes, read other agents' transcripts, or automatically identify every coding agent
+on the machine. The panel displays only work that an installed reporter or an explicit
+CLI/API integration sends to its shared store.
+
+| Runtime | Automatic reporting included? | Coverage |
+|---|---|---|
+| Pi | Yes | The shipped Pi extension reports Pi sessions and tool events. |
+| Sovereign company-web | Yes, in that product integration | Its server emits request-specific routing and model stages. |
+| Codex CLI | Optional hook reporter included; opt-in setup required | Merge the supplied hooks into `~/.codex/hooks.json` and review/trust them with `/hooks`. Once enabled, new turns, individual local tool calls, and subagent activity are reported without prompts, command arguments, or tool output. Plugin installation alone does not enable Codex reporting. |
+| Claude Code | No adapter included | Not automatically detected or synchronized. |
+| Hermes Agent | No adapter included | Not automatically detected or synchronized. |
+
+The optional Codex reporter is `bin/codex-hook.py`; see
+[`examples/codex-hooks/hooks.json`](examples/codex-hooks/hooks.json) for the hook
+registrations. Codex requires trust review for non-managed hooks; use `/hooks` in the
+Codex CLI to review/trust them. This is explicit opt-in instrumentation, not process
+auto-discovery. `~/.codex/hooks.json` is user-level, so the configuration applies to
+that user's Codex sessions after trust, not just one window; remove/disable the entries
+to stop reporting. Codex also provides `codex exec --json` for non-interactive event
+streams; the current reporter uses the Codex CLI hooks API for interactive turns. It
+shows explicit execution events, not private model reasoning/chain-of-thought; Codex does
+not provide that as a workflow telemetry event. Up to eight tool calls and four subagents
+are drawn individually; further calls are bounded and aggregated.
+
+Any host that runs agents can report by writing the JSON above or invoking the CLI; this
+is an extension point, not automatic discovery. Two small conventions keep the picture
+clean:
 
 - **Instrumentation must never break the agent it observes.** The bundled writer swallows its own
   failures, and the example extension wraps every emit in try/catch.

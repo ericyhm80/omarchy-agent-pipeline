@@ -32,6 +32,7 @@ import datetime as dt
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -303,6 +304,10 @@ def main() -> int:
     je.add_argument("--confidence", type=float, default=None)
     je.add_argument("--agreement", choices=["yes", "no"], default=None)
     je.add_argument("--error-type", default="")
+    je.add_argument("--project-id", default="")
+    je.add_argument("--cost-usd", type=float, default=None)
+    je.add_argument("--price-model", default="")
+    je.add_argument("--input-usd-per-million", type=float, default=None)
 
     pt = sub.add_parser("patch", help="merge a JSON patch into one request (single process)")
     pt.add_argument("json")
@@ -470,7 +475,8 @@ def main() -> int:
                 entry["tokens"] = tokens
             row["nodes"].append(entry)
             # every recorded node implies the edge that fed it was traversed
-            for edge in (data.get("architecture") or {}).get("edges", []):
+            graph = row.get("architecture") or data.get("architecture") or {}
+            for edge in graph.get("edges", []):
                 if edge.get("to") == args.node:
                     pair = {"from": edge["from"], "to": edge["to"]}
                     if pair not in row.setdefault("edges", []):
@@ -492,6 +498,17 @@ def main() -> int:
                 "latencyMs": round(max(0.0, args.latency_ms), 1),
                 "taskClass": re.sub(r"[^A-Za-z0-9_-]", "", args.task_class)[:40],
             }
+            project_id = re.sub(r"[^A-Za-z0-9_-]", "", args.project_id)[:120]
+            if project_id:
+                event["projectId"] = project_id
+            if (args.cost_usd is not None and math.isfinite(args.cost_usd)
+                    and args.cost_usd >= 0):
+                event["costUsd"] = round(args.cost_usd, 12)
+                event["priceModel"] = re.sub(r"[^A-Za-z0-9_.-]", "", args.price_model)[:80]
+                if (args.input_usd_per_million is not None
+                        and math.isfinite(args.input_usd_per_million)
+                        and args.input_usd_per_million >= 0):
+                    event["inputUsdPerMillion"] = args.input_usd_per_million
             if args.input_tokens is not None:
                 event["inputTokens"] = max(0, args.input_tokens)
             if args.output_tokens is not None:
@@ -552,7 +569,8 @@ def main() -> int:
                     continue
                 row["nodes"] = [n for n in row["nodes"] if n.get("id") != node["id"]]
                 row["nodes"].append(node)
-                for edge in (data.get("architecture") or {}).get("edges", []):
+                graph = row.get("architecture") or data.get("architecture") or {}
+                for edge in graph.get("edges", []):
                     if edge.get("to") == node["id"]:
                         pair = {"from": edge["from"], "to": edge["to"]}
                         if pair not in row.setdefault("edges", []):

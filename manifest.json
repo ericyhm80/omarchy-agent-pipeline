@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.ericyhm80.agent-pipeline",
   "name": "Agent Pipeline",
-  "version": "0.7.5",
+  "version": "0.7.7",
   "author": "haomin.ye (ericyhm80)",
   "license": "MIT",
   "repository": "https://github.com/ericyhm80/omarchy-agent-pipeline",

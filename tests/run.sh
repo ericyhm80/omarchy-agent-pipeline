@@ -8,4 +8,7 @@ echo
 echo "== bin/agent-pipeline — writer =="
 python3 test_cli.py
 echo
+echo "== Codex CLI hooks — privacy + pipeline integration =="
+python3 test_codex_hook.py
+echo
 echo "all agent-pipeline tests passed"

@@ -1,0 +1,26 @@
+{
+  "description": "Opt-in Agent Pipeline reporting for Codex CLI; merge these entries into ~/.codex/hooks.json",
+  "hooks": {
+    "UserPromptSubmit": [
+      {"hooks": [{"type": "command", "command": "python3 \"$HOME/.config/omarchy/plugins/io.github.ericyhm80.agent-pipeline/bin/codex-hook.py\" --event UserPromptSubmit", "timeout": 3}]}
+    ],
+    "PreToolUse": [
+      {"hooks": [{"type": "command", "command": "python3 \"$HOME/.config/omarchy/plugins/io.github.ericyhm80.agent-pipeline/bin/codex-hook.py\" --event PreToolUse", "timeout": 3}]}
+    ],
+    "PostToolUse": [
+      {"hooks": [{"type": "command", "command": "python3 \"$HOME/.config/omarchy/plugins/io.github.ericyhm80.agent-pipeline/bin/codex-hook.py\" --event PostToolUse", "timeout": 3}]}
+    ],
+    "SubagentStart": [
+      {"hooks": [{"type": "command", "command": "python3 \"$HOME/.config/omarchy/plugins/io.github.ericyhm80.agent-pipeline/bin/codex-hook.py\" --event SubagentStart", "timeout": 3}]}
+    ],
+    "SubagentStop": [
+      {"hooks": [{"type": "command", "command": "python3 \"$HOME/.config/omarchy/plugins/io.github.ericyhm80.agent-pipeline/bin/codex-hook.py\" --event SubagentStop", "timeout": 3}]}
+    ],
+    "Stop": [
+      {"hooks": [{"type": "command", "command": "python3 \"$HOME/.config/omarchy/plugins/io.github.ericyhm80.agent-pipeline/bin/codex-hook.py\" --event Stop", "timeout": 3}]}
+    ],
+    "Interrupt": [
+      {"hooks": [{"type": "command", "command": "python3 \"$HOME/.config/omarchy/plugins/io.github.ericyhm80.agent-pipeline/bin/codex-hook.py\" --event Interrupt", "timeout": 3}]}
+    ]
+  }
+}

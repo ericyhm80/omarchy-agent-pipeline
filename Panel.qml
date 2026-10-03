@@ -492,7 +492,10 @@ Panel {
                   + " in / " + Model.fmtTokens(root.jevStats.outputTokens) + " out"
                 : " · token usage not returned")
               + (root.jevStats.avgMs !== null ? " · avg " + Model.fmtMs(root.jevStats.avgMs) : "")
-              + " · cost not returned by API"
+              + " · cost " + (root.jevStats.costReported > 0
+                ? Model.fmtCost(root.jevStats.costUsd) + " (" + root.jevStats.costReported
+                  + "/" + root.jevStats.calls + " priced)"
+                : "unknown")
             : "JEV telemetry: no calls recorded by this panel yet"
           color: root.dim
           font.family: root.fontFamily
