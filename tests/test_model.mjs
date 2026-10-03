@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const modelPath = path.join(here, "..", "Model.js");
 let src = fs.readFileSync(modelPath, "utf8").replace(/^\.pragma library[^\n]*\n/, "");
-src += "\nexport { parse, computeHealth, healthRows, healthColorKey, fmtScore, runtimeFacts, cacheHitPct, tokensPerSec, HEALTH, windowStats, headlineFacts, windowLines, scoreSeries, sparkBars, ageLabel, isSettled, isWaiting, instrumentStatus };\n";
+src += "\nexport { parse, computeHealth, healthRows, healthColorKey, fmtScore, runtimeFacts, cacheHitPct, tokensPerSec, HEALTH, windowStats, headlineFacts, windowLines, scoreSeries, sparkBars, ageLabel, isSettled, isWaiting, instrumentStatus, jevStats };\n";
 const tmp = path.join(os.tmpdir(), `agent-pipeline-model-${process.pid}.mjs`);
 fs.writeFileSync(tmp, src);
 const Model = await import(`file://${tmp}?t=${Date.now()}`);
@@ -23,6 +23,20 @@ function ok(name, cond, extra) {
   else { fail++; console.log("  \u2717", name, extra === undefined ? "" : extra); }
 }
 const req = (o) => Object.assign({ id: "r", at: "2026-10-02T00:00:00Z", state: "done", durationMs: 1000 }, o);
+
+const jevPayload = Model.parse(JSON.stringify({ requests: [], jevEvents: [
+  { source: "token-router", status: "success", inputTokens: 566, outputTokens: 111, latencyMs: 200 },
+  { source: "model-router", status: "error", latencyMs: 600 },
+] }));
+const jevSummary = Model.jevStats(jevPayload.jevEvents);
+ok("JEV events survive request-store parsing", jevPayload.jevEvents.length === 2);
+ok("JEV global stats distinguish successful and failed API calls", jevSummary.calls === 2 &&
+   jevSummary.success === 1 && jevSummary.failed === 1, JSON.stringify(jevSummary));
+ok("JEV global stats break down both participating code paths", jevSummary.tokenRouter === 1 &&
+   jevSummary.modelRouter === 1, JSON.stringify(jevSummary));
+ok("JEV usage and mean latency are aggregated without inventing money", jevSummary.usageReported === 1 &&
+   jevSummary.inputTokens === 566 && jevSummary.outputTokens === 111 && jevSummary.avgMs === 400 &&
+   !("costUsd" in jevSummary), JSON.stringify(jevSummary));
 
 // a settled, clean run: stability/robustness 100, security has no evidence -> null
 let h = Model.computeHealth([req({})]);

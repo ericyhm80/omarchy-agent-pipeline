@@ -41,6 +41,7 @@ from pathlib import Path
 STATE_HOME = Path(os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state"))
 STORE = STATE_HOME / "omarchy" / "agent-pipeline" / "requests.json"
 MAX_REQUESTS = 30
+JEV_EVENT_MAX = 200
 # Facts are bounded like everything else here: a run with more tool calls than this
 # keeps its newest entries. The robustness penalty is capped per request anyway
 # (Model.js HEALTH.robustness.cap), so truncation can only affect runs that have
@@ -85,20 +86,24 @@ def now() -> str:
 
 def load() -> dict:
     if not STORE.exists():
-        return {"updatedAt": now(), "requests": [], "architecture": DEFAULT_ARCHITECTURE}
+        return {"updatedAt": now(), "requests": [], "jevEvents": [],
+                "architecture": DEFAULT_ARCHITECTURE}
     try:
         data = json.loads(STORE.read_text(encoding="utf-8"))
         if not isinstance(data, dict) or not isinstance(data.get("requests"), list):
             raise ValueError("bad shape")
         data.setdefault("architecture", DEFAULT_ARCHITECTURE)
+        data.setdefault("jevEvents", [])
         return data
     except (json.JSONDecodeError, OSError, ValueError):
-        return {"updatedAt": now(), "requests": [], "architecture": DEFAULT_ARCHITECTURE}
+        return {"updatedAt": now(), "requests": [], "jevEvents": [],
+                "architecture": DEFAULT_ARCHITECTURE}
 
 
 def save(data: dict) -> None:
     data["updatedAt"] = now()
     data["requests"] = data["requests"][-MAX_REQUESTS:]
+    data["jevEvents"] = data.get("jevEvents", [])[-JEV_EVENT_MAX:]
     refresh_instrument(data)
     STORE.parent.mkdir(parents=True, exist_ok=True)
     tmp = STORE.with_suffix(".tmp")
@@ -287,6 +292,18 @@ def main() -> int:
     n.add_argument("--ms", type=float, default=0.0)
     n.add_argument("--tokens-json", dest="tokens_json", default=None)
 
+    je = sub.add_parser("jev-event", help="record one privacy-minimal external JEV API attempt")
+    je.add_argument("--source", required=True, choices=["token-router", "model-router"])
+    je.add_argument("--status", required=True, choices=["success", "error"])
+    je.add_argument("--model", default="")
+    je.add_argument("--latency-ms", type=float, default=0.0)
+    je.add_argument("--input-tokens", type=int, default=None)
+    je.add_argument("--output-tokens", type=int, default=None)
+    je.add_argument("--task-class", default="")
+    je.add_argument("--confidence", type=float, default=None)
+    je.add_argument("--agreement", choices=["yes", "no"], default=None)
+    je.add_argument("--error-type", default="")
+
     pt = sub.add_parser("patch", help="merge a JSON patch into one request (single process)")
     pt.add_argument("json")
     pt.add_argument("--file", default=None, help="read the patch JSON from a file instead")
@@ -460,6 +477,32 @@ def main() -> int:
                         row["edges"].append(pair)
             if args.status in ("error", "failed"):
                 row["state"] = "error"
+            save(data)
+            return 0
+        return with_lock(op)
+
+    if args.cmd == "jev-event":
+        def op() -> int:
+            data = load()
+            event = {
+                "at": now(),
+                "source": args.source,
+                "status": args.status,
+                "model": re.sub(r"[^A-Za-z0-9_.:/-]", "", args.model)[:80],
+                "latencyMs": round(max(0.0, args.latency_ms), 1),
+                "taskClass": re.sub(r"[^A-Za-z0-9_-]", "", args.task_class)[:40],
+            }
+            if args.input_tokens is not None:
+                event["inputTokens"] = max(0, args.input_tokens)
+            if args.output_tokens is not None:
+                event["outputTokens"] = max(0, args.output_tokens)
+            if args.confidence is not None:
+                event["confidence"] = round(min(1.0, max(0.0, args.confidence)), 4)
+            if args.agreement is not None:
+                event["agreement"] = args.agreement == "yes"
+            if args.error_type:
+                event["errorType"] = re.sub(r"[^A-Za-z0-9_.]", "", args.error_type)[:80]
+            data.setdefault("jevEvents", []).append(event)
             save(data)
             return 0
         return with_lock(op)

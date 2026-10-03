@@ -54,6 +54,11 @@ def main() -> int:
             "--metrics-json", '{"retries":1}', "--env-json", '{"region":"cn"}')
         # signal on an unknown id must create the request, not crash
         run("signal", "--id", "R2", "--dimension", "security", "--kind", "no_risk_detected", "--level", "info")
+        run("jev-event", "--source", "token-router", "--status", "success", "--model", "jev-latest",
+            "--latency-ms", "213.7", "--input-tokens", "566", "--output-tokens", "111",
+            "--task-class", "analysis", "--confidence", "0.91", "--agreement", "no")
+        run("jev-event", "--source", "model-router", "--status", "error", "--model", "jev-latest",
+            "--latency-ms", "500", "--error-type", "TimeoutError")
         # a bad patch must be swallowed, never raise
         run("patch", "not json")
 
@@ -70,6 +75,16 @@ def main() -> int:
         ok("state and duration set", r1["state"] == "done" and r1["durationMs"] == 8200.0, (r1["state"], r1.get("durationMs")))
         ok("unknown id auto-created", "signals" in rows["R2"] and len(rows["R2"]["signals"]) == 1)
         ok("no leftover temp file", not (store.parent / "requests.tmp").exists())
+        events = data.get("jevEvents", [])
+        ok("JEV call events recorded across call sources", len(events) == 2 and
+           {e.get("source") for e in events} == {"token-router", "model-router"}, events)
+        ok("JEV event retains outcome and usage metadata", events[0].get("status") == "success" and
+           events[0].get("inputTokens") == 566 and events[0].get("outputTokens") == 111 and
+           events[0].get("agreement") is False, events[0] if events else events)
+        ok("JEV event contains no prompt, raw input, key, or state fields", all(
+            key.lower() not in {"prompt", "input", "api_key", "apikey", "key", "state"}
+            for event in events for key in event), events)
+        ok("JEV event has no fabricated cost", all("costUsd" not in event and "cost" not in event for event in events))
 
         # ---- tool FACTS + the reconcile command that can reconstruct them -----
         def reload() -> dict:

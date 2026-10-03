@@ -78,6 +78,7 @@ Panel {
   readonly property var windowStats: Model.windowStats(requests)
   readonly property var headlineFacts: Model.headlineFacts(windowStats)
   readonly property var windowLines: Model.windowLines(windowStats)
+  readonly property var jevStats: Model.jevStats(snapshot.jevEvents)
   readonly property var outcomeStrip: windowStats ? windowStats.outcomeStrip : []
 
   function refresh() {
@@ -478,6 +479,25 @@ Panel {
             font.pixelSize: Style.font.caption
             elide: Text.ElideRight
           }
+        }
+
+        Text {
+          width: column.width
+          text: root.jevStats.calls > 0
+            ? "JEV telemetry (latest ≤200): " + root.jevStats.calls + " calls · "
+              + root.jevStats.success + " ok / " + root.jevStats.failed + " failed · "
+              + "token-router " + root.jevStats.tokenRouter + " / model-router " + root.jevStats.modelRouter
+              + (root.jevStats.usageReported > 0
+                ? " · usage(" + root.jevStats.usageReported + ") " + Model.fmtTokens(root.jevStats.inputTokens)
+                  + " in / " + Model.fmtTokens(root.jevStats.outputTokens) + " out"
+                : " · token usage not returned")
+              + (root.jevStats.avgMs !== null ? " · avg " + Model.fmtMs(root.jevStats.avgMs) : "")
+              + " · cost not returned by API"
+            : "JEV telemetry: no calls recorded by this panel yet"
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
         }
 
         // ------------------------------------------------------- the graph

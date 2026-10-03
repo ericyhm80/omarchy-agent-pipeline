@@ -29,7 +29,7 @@ export default function (pi) {
   // (id, version, time, pid); the writer records what is on disk NOW next to it,
   // and the panel says whether the scores can be trusted yet.
   const EXT_ID = "agent-pipeline";
-  const EXT_VERSION = "0.7.4";
+  const EXT_VERSION = "0.7.5";
   const LOADED_AT = new Date().toISOString();
   function procPid() {
     try { return Number(process.pid) || 0; } catch { return 0; }

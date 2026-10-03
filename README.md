@@ -1,5 +1,9 @@
 # Agent Pipeline — see what your AI agent is actually doing
 
+**0.7.5:** privacy-minimal JEV API telemetry (latest 200 attempts, usage/latency,
+source and outcome) plus per-request router provenance; it is observational only and
+never changes health scores. TypeSafe usage currently omits price, shown as unknown.
+
 An Omarchy bar widget that renders **one pipeline per agent request**: how the
 request was classified, which model tier it was routed to, what memory was
 retrieved, which tools ran, and whether the result was verified — with timing,
@@ -35,6 +39,12 @@ The panel draws the agent's architecture as a **graph**, not a list:
   scores with a one-line alert when one slips;
 - a **window summary** — runs, success rate, spend, cache hit rate, median latency,
   rate and recency — and an **outcome strip** of the last runs;
+- a separate **JEV API summary** for the latest up to 200 external attempts across
+  `token-router` and `model-router`: successes/failures, returned usage tokens and
+  average latency. It records no prompts, API keys, or provider error text; TypeSafe
+  does not return cost in the observed usage payload, so the panel says cost was not
+  returned rather than displaying a fabricated zero. JEV telemetry never changes
+  architecture health scores;
 - a **trend sparkline** inside each gauge, oldest to newest, with the sample size `n`;
 - under the run, every **runtime fact** it recorded: duration, tokens in/out/cache,
   cost, cache hit rate, throughput, tool calls, api calls, retries, fallbacks,
@@ -47,6 +57,20 @@ usable for explaining an agent to someone who has never seen one: what it classi
 as, which model it chose, what it retrieved, which tools it ran, and what went wrong.
 
 ![pipeline graph](preview.png)
+
+## JEV call telemetry
+
+`agent-pipeline jev-event` appends one privacy-minimal record per actual TypeSafe
+System One API attempt observed after this telemetry was installed. The bounded
+`jevEvents` list retains the newest 200 records, including source (`token-router` /
+`model-router`), result, model, elapsed
+time, and token usage only when the provider reports it. Disabled routing and
+missing credentials are not counted as external calls. Each company-web request's
+router node separately states whether JEV actually classified the request or
+whether deterministic rules supplied the fallback. This telemetry is independent
+of the company's monetary budget ledger: because the currently observed JEV API
+response reports tokens but no price, the dashboard explicitly labels cost as not
+returned; it must not be interpreted as free or as budget-accounted.
 
 ## Architecture health
 

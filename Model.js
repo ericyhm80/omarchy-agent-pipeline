@@ -21,13 +21,14 @@ function parse(text) {
   try {
     data = JSON.parse(String(text || ""))
   } catch (err) {
-    return { updatedAt: "", requests: [], invalid: true }
+    return { updatedAt: "", requests: [], jevEvents: [], invalid: true }
   }
   if (!data || !data.requests || !Array.isArray(data.requests))
-    return { updatedAt: "", requests: [], invalid: true }
+    return { updatedAt: "", requests: [], jevEvents: [], invalid: true }
   var rows = data.requests.slice()
   rows.sort(function(a, b) { return String(b.at || "") > String(a.at || "") ? 1 : -1 })
-  return { updatedAt: String(data.updatedAt || ""), requests: rows, invalid: false,
+  return { updatedAt: String(data.updatedAt || ""), requests: rows,
+           jevEvents: Array.isArray(data.jevEvents) ? data.jevEvents.slice() : [], invalid: false,
            instrument: (data.instrument && typeof data.instrument === "object") ? data.instrument : null }
 }
 
@@ -133,6 +134,30 @@ function architecture(data) {
 
 function nodeSubtitle(node) {
   return String((node && (node.labelEn || "")) || "")
+}
+
+// JEV attempts are global provider facts, separate from pipeline health scores.
+// The writer keeps only the newest 200 and never records prompts, keys, or prices.
+function jevStats(events) {
+  var rows = Array.isArray(events) ? events.slice(-200) : []
+  var out = { calls: rows.length, success: 0, failed: 0, usageReported: 0,
+              inputTokens: 0, outputTokens: 0, tokenRouter: 0, modelRouter: 0, avgMs: null }
+  var totalMs = 0, timed = 0
+  for (var i = 0; i < rows.length; i++) {
+    var e = rows[i] || {}
+    if (String(e.status) === "success") out.success++
+    else if (String(e.status) === "error") out.failed++
+    var source = String(e.source || "")
+    if (source === "token-router") out.tokenRouter++
+    else if (source === "model-router") out.modelRouter++
+    if (e.inputTokens !== undefined || e.outputTokens !== undefined) out.usageReported++
+    out.inputTokens += Math.max(0, num(e.inputTokens))
+    out.outputTokens += Math.max(0, num(e.outputTokens))
+    var ms = num(e.latencyMs)
+    if (ms > 0) { totalMs += ms; timed++ }
+  }
+  if (timed) out.avgMs = Math.round(totalMs / timed)
+  return out
 }
 
 function nodeById(arch, id) {
