@@ -142,15 +142,37 @@ export default function (pi) {
 
   pi.on("tool_execution_end", async (event) => {
     if (!running) return;
-    var key = event?.toolCallId !== undefined ? String(event.toolCallId) : null;
-    if (key && toolStart[key]) { toolMs += Math.max(0, Date.now() - toolStart[key]); delete toolStart[key]; }
-    if (!event?.isError) return;
-    toolErrors += 1;
+    const toolName = String(event?.toolName ?? "tool");
+    const key = event?.toolCallId !== undefined ? String(event.toolCallId) : null;
+    let ms = 0;
+    if (key !== null && toolStart[key] !== undefined) {
+      ms = Math.max(0, Date.now() - toolStart[key]);
+      toolMs += ms;
+      delete toolStart[key];
+    }
+    const ok = !event?.isError;
+    if (!ok) toolErrors += 1;
+    // FACTS, not claims: one entry per finished tool call, in completion order.
+    // The scorer DERIVES absorption from this log — an earlier failure of a tool is
+    // absorbed when a later call of the SAME tool succeeds in the same run. So no
+    // in-memory counter and no compensating `tool_recovered` signal is needed.
+    // Why the counter had to go (measured 2026-10-03): it lived inside one pi
+    // process, so a reload started from zero and every failure recorded before the
+    // reload stayed uncancellable forever — R read 84% for a run whose two failures
+    // the session log shows were absorbed 11s and 2s later. A fact survives the
+    // reload that a counter does not; the failure signal below is kept only as a
+    // human-readable observation (the score no longer depends on it).
+    const fact = { tool: toolName, ok: ok, ms: ms };
+    if (ok) {
+      await patch({ id, metrics: { toolCalls, toolErrors }, toolLog: [fact] });
+      return;
+    }
     await patch({
       id,
       metrics: { toolCalls, toolErrors },
+      toolLog: [fact],
       signals: [{ dimension: "robustness", kind: "tool_failure", level: "warn",
-                  detail: "tool error in " + String(event?.toolName ?? "tool"), node: "tools" }]
+                  detail: "tool error in " + toolName, node: "tools" }]
     });
   });
 
