@@ -29,6 +29,20 @@ Panel {
 
   readonly property string dataPath: (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state"))
     + "/omarchy/agent-pipeline/requests.json"
+  readonly property string pluginDir: (Quickshell.env("HOME") || "")
+    + "/.config/omarchy/plugins/io.github.ericyhm80.agent-pipeline"
+  property bool connectionSettingsOpen: false
+  property bool setupBusy: false
+  property bool setupFailed: false
+  property string setupAction: ""
+  property string setupOutput: ""
+  property string setupError: ""
+  property bool setupStdoutFinished: false
+  property bool setupStderrFinished: false
+  property bool setupProcessExited: false
+  property int setupExitCode: -1
+  property string setupMessage: ""
+  property var reporterStatus: ({ codex: false, pi: false, writerAvailable: false })
 
   property var snapshot: Model.parse("")
   readonly property var requests: snapshot.requests
@@ -83,6 +97,53 @@ Panel {
 
   function refresh() {
     dataView.reload()
+  }
+
+  function runReporterSetup(action, runtime) {
+    if (setupBusy) return
+    setupAction = action + (runtime ? " " + runtime : "")
+    setupOutput = ""
+    setupError = ""
+    setupStdoutFinished = false
+    setupStderrFinished = false
+    setupProcessExited = false
+    setupExitCode = -1
+    setupBusy = true
+    if (action !== "status") {
+      setupFailed = false
+      setupMessage = action === "connect" ? "Configuring reporter…" : "Removing reporter…"
+    }
+    reporterSetupProcess.command = ["/usr/bin/python3", pluginDir + "/bin/agent-pipeline-setup.py", action]
+    if (runtime) reporterSetupProcess.command.push(runtime)
+    reporterSetupProcess.running = true
+  }
+
+  function completeReporterSetupIfReady() {
+    if (!setupProcessExited || !setupStdoutFinished || !setupStderrFinished) return
+    handleReporterSetupExit(setupExitCode)
+  }
+
+  function handleReporterSetupExit(exitCode) {
+    setupBusy = false
+    let result = {}
+    try { result = JSON.parse(setupOutput || "{}") }
+    catch (e) { result = { ok: false, message: "Setup helper returned invalid status." } }
+    if (setupAction === "status") {
+      if (result.ok) reporterStatus = result
+      else {
+        setupFailed = true
+        setupError = result.message || "Could not read reporter status."
+      }
+      return
+    }
+    setupFailed = !result.ok || exitCode !== 0
+    setupMessage = result.message || (exitCode === 0 ? "Setup complete." : "Setup failed safely.")
+    if (setupFailed && setupError) setupMessage += " " + setupError
+    Qt.callLater(function() { root.runReporterSetup("status", "") })
+  }
+
+  onConnectionSettingsOpenChanged: {
+    if (connectionSettingsOpen) runReporterSetup("status", "")
   }
 
   function nodeColor(status) {
@@ -158,6 +219,31 @@ Panel {
 
   function closeForPopoutSwitch() {
     root.close()
+  }
+
+  Process {
+    id: reporterSetupProcess
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.setupOutput = text
+        root.setupStdoutFinished = true
+        root.completeReporterSetupIfReady()
+      }
+    }
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        root.setupError = text
+        root.setupStderrFinished = true
+        root.completeReporterSetupIfReady()
+      }
+    }
+    onExited: function(exitCode) {
+      root.setupExitCode = exitCode
+      root.setupProcessExited = true
+      root.completeReporterSetupIfReady()
+    }
   }
 
   FileView {
@@ -250,6 +336,31 @@ Panel {
             font.bold: true
           }
 
+          Rectangle {
+            id: connectionsButton
+            width: connectionsButtonText.implicitWidth + Style.space(16)
+            height: connectionsButtonText.implicitHeight + Style.space(8)
+            radius: 6
+            color: root.connectionSettingsOpen
+              ? root.withAlpha(root.accent, 0.16) : "transparent"
+            border.width: 1
+            border.color: root.withAlpha(root.foreground, 0.2)
+            Text {
+              id: connectionsButtonText
+              anchors.centerIn: parent
+              text: root.connectionSettingsOpen ? "BACK" : "CONNECT"
+              color: root.connectionSettingsOpen ? root.accent : root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+            }
+            MouseArea {
+              anchors.fill: parent
+              cursorShape: Qt.PointingHandCursor
+              onClicked: root.connectionSettingsOpen = !root.connectionSettingsOpen
+            }
+          }
+
           Item { width: Math.max(0, parent.width - x - stateBadge.width); height: 1 }
 
           Rectangle {
@@ -272,6 +383,12 @@ Panel {
             }
           }
         }
+
+        Column {
+          id: dashboard
+          width: parent.width
+          spacing: Style.space(8)
+          visible: !root.connectionSettingsOpen
 
         // ------------------------------------------------ architecture health
         Row {
@@ -823,6 +940,241 @@ Panel {
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           elide: Text.ElideRight
+        }
+        }
+
+        Column {
+          id: connectionsPage
+          width: parent.width
+          spacing: Style.space(10)
+          visible: root.connectionSettingsOpen
+
+          Text {
+            text: "Connect your agents"
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.subtitle
+            font.bold: true
+          }
+          Text {
+            width: parent.width
+            text: "Nothing connects until you click a button. This page checks only the known reporter config paths and writer command, not running processes or API documentation."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+
+          Rectangle {
+            width: parent.width
+            height: codexCard.implicitHeight + Style.space(20)
+            radius: 8
+            color: root.withAlpha(root.foreground, 0.035)
+            border.width: 1
+            border.color: root.withAlpha(root.foreground, 0.15)
+            Column {
+              id: codexCard
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.top: parent.top
+              anchors.margins: Style.space(10)
+              spacing: Style.space(6)
+              Row {
+                width: parent.width
+                spacing: Style.space(8)
+                Column {
+                  spacing: Style.space(2)
+                  Text {
+                    text: "Codex CLI"
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    font.bold: true
+                  }
+                  Text {
+                    text: root.reporterStatus.codex
+                      ? (root.reporterStatus.codexComplete ? "Configured · trust in Codex /hooks" : "Partial hooks · remove or reconnect")
+                      : "Not connected"
+                    color: root.reporterStatus.codex ? root.accent : root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+                Item { width: Math.max(0, parent.width - x - codexAction.width); height: 1 }
+                Rectangle {
+                  id: codexAction
+                  width: codexActionText.implicitWidth + Style.space(16)
+                  height: codexActionText.implicitHeight + Style.space(8)
+                  radius: 6
+                  color: root.withAlpha(root.accent, 0.12)
+                  border.width: 1
+                  border.color: root.withAlpha(root.accent, 0.5)
+                  Text {
+                    id: codexActionText
+                    anchors.centerIn: parent
+                    text: root.setupBusy ? "WAIT…" : root.reporterStatus.codex ? "REMOVE" : "CONNECT"
+                    color: root.accent
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                  }
+                  MouseArea {
+                    anchors.fill: parent
+                    enabled: !root.setupBusy
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.runReporterSetup(root.reporterStatus.codex ? "disconnect" : "connect", "codex")
+                  }
+                }
+              }
+              Text {
+                width: parent.width
+                text: "Adds or removes only Agent Pipeline hooks in CODEX_HOME/hooks.json; existing hooks are backed up and preserved. Then review/trust them in Codex with /hooks."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+            }
+          }
+
+          Rectangle {
+            width: parent.width
+            height: piCard.implicitHeight + Style.space(20)
+            radius: 8
+            color: root.withAlpha(root.foreground, 0.035)
+            border.width: 1
+            border.color: root.withAlpha(root.foreground, 0.15)
+            Column {
+              id: piCard
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.top: parent.top
+              anchors.margins: Style.space(10)
+              spacing: Style.space(6)
+              Row {
+                width: parent.width
+                spacing: Style.space(8)
+                Column {
+                  spacing: Style.space(2)
+                  Text {
+                    text: "Pi"
+                    color: root.foreground
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.body
+                    font.bold: true
+                  }
+                  Text {
+                    text: root.reporterStatus.pi ? "Installed · restart or reload Pi" : "Not connected"
+                    color: root.reporterStatus.pi ? root.accent : root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+                }
+                Item { width: Math.max(0, parent.width - x - piAction.width); height: 1 }
+                Rectangle {
+                  id: piAction
+                  width: piActionText.implicitWidth + Style.space(16)
+                  height: piActionText.implicitHeight + Style.space(8)
+                  radius: 6
+                  color: root.withAlpha(root.accent, 0.12)
+                  border.width: 1
+                  border.color: root.withAlpha(root.accent, 0.5)
+                  Text {
+                    id: piActionText
+                    anchors.centerIn: parent
+                    text: root.setupBusy ? "WAIT…" : root.reporterStatus.pi ? "REMOVE" : "CONNECT"
+                    color: root.accent
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                  }
+                  MouseArea {
+                    anchors.fill: parent
+                    enabled: !root.setupBusy
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: root.runReporterSetup(root.reporterStatus.pi ? "disconnect" : "connect", "pi")
+                  }
+                }
+              }
+              Text {
+                width: parent.width
+                text: "Installs the prompt-safe Pi extension and makes the local CLI available. It never reads prompt text or overwrites an existing extension."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+            }
+          }
+
+          Rectangle {
+            width: parent.width
+            height: customCard.implicitHeight + Style.space(20)
+            radius: 8
+            color: root.withAlpha(root.foreground, 0.035)
+            border.width: 1
+            border.color: root.withAlpha(root.foreground, 0.15)
+            Column {
+              id: customCard
+              anchors.left: parent.left
+              anchors.right: parent.right
+              anchors.top: parent.top
+              anchors.margins: Style.space(10)
+              spacing: Style.space(6)
+              Text {
+                text: "Other / custom agents"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                font.bold: true
+              }
+              Text {
+                width: parent.width
+                text: "Claude Code · Hermes · OpenClaw: no bundled automatic hook yet. Manual mode records only the checkpoints you choose; it does not watch or infer agent activity. Keep this shell open while the agent runs."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+              TextEdit {
+                width: parent.width
+                readOnly: true
+                selectByMouse: true
+                textFormat: TextEdit.PlainText
+                text: 'PIPE="$HOME/.config/omarchy/plugins/io.github.ericyhm80.agent-pipeline/bin/agent-pipeline"\nREQ=manual-$(date +%s%N)-$$\n# Pick one agent label: claude-code, hermes, or openclaw\nAGENT=claude-code\n"$PIPE" start --id "$REQ" --title "Manual agent turn" --agent "$AGENT"\n# While the task is running, report a safe checkpoint manually:\n"$PIPE" node --id "$REQ" --node tools --status ok --detail "manual checkpoint"\n# When that task ends:\n"$PIPE" end --id "$REQ" --state done'
+                color: root.accent
+                font.family: "monospace"
+                font.pixelSize: Style.font.caption
+                wrapMode: TextEdit.WrapAnywhere
+              }
+              Text {
+                width: parent.width
+                text: "Copy/run the start line before the session, checkpoint lines as needed, and end line afterward. Replace AGENT with hermes or openclaw. Never pass prompts, command arguments, tool output, or transcripts."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+            }
+          }
+
+          Text {
+            width: parent.width
+            visible: root.setupMessage !== "" || root.setupError !== ""
+            text: root.setupMessage || root.setupError
+            color: root.setupFailed ? root.urgent : root.accent
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+          Text {
+            width: parent.width
+            text: "All setup is local and opt-in. The widget itself makes no network requests."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
         }
       }
     }

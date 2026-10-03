@@ -1,9 +1,10 @@
 # Agent Pipeline — see what your AI agent is actually doing
 
-**0.7.7:** privacy-minimal JEV API telemetry (latest 200 attempts, usage/latency,
-source, outcome and version-matched cost) plus per-request router provenance; it is
-observational only and never changes health scores. Unknown versions/usages remain
-explicitly unpriced.
+**0.7.8:** an in-panel, explicit Connect flow for Codex CLI and Pi, plus a generic
+CLI path for other runtimes. Setup is local, preserves existing config, and is
+reversible; Pi request titles no longer contain prompt text. JEV call telemetry is
+observational only, never affects health scores, and remains unpriced when the model
+version or usage is unknown.
 
 An Omarchy bar widget that renders **one pipeline per agent request**: how the
 request was classified, which model tier it was routed to, what memory was
@@ -291,7 +292,7 @@ never fails loudly, so instrumentation cannot break the agent it observes:
 # optional: describe your own architecture once (omit to use the shipped pipeline)
 agent-pipeline architecture --file my-graph.json
 
-agent-pipeline start --id "$REQ" --title "Where is the memory-eval command registered?" --agent entrepreneur-agent
+agent-pipeline start --id "$REQ" --title "Agent turn" --agent entrepreneur-agent
 agent-pipeline node  --id "$REQ" --node router --status ok --detail "lookup → cheap"     --ms 239
 agent-pipeline node  --id "$REQ" --node memory --status ok --detail "1 item retrieved"      --ms 2793
 agent-pipeline node  --id "$REQ" --node model  --status ok --detail "zai/glm-5.3-flash"  --ms 11989
@@ -325,16 +326,20 @@ returns to the newest. The newest run keeps recording while you inspect, so noth
 **This is not an agent auto-discovery service.** Installing the plugin does not watch
 processes, read other agents' transcripts, or automatically identify every coding agent
 on the machine. The panel displays only work that an installed reporter or an explicit
-CLI/API integration sends to its shared store.
+CLI/API integration sends to its shared store. See the [customer usage guide](docs/USAGE.md)
+for opt-in setup, privacy boundaries, and removal instructions.
 
 | Runtime | Automatic reporting included? | Coverage |
 |---|---|---|
-| Pi | Yes | The shipped Pi extension reports Pi sessions and tool events. |
+| Pi | Optional reporter included | Select **Connect** in the panel to install the prompt-free Pi extension; restart/reload Pi afterward. |
 | Sovereign company-web | Yes, in that product integration | Its server emits request-specific routing and model stages. |
-| Codex CLI | Optional hook reporter included; opt-in setup required | Merge the supplied hooks into `~/.codex/hooks.json` and review/trust them with `/hooks`. Once enabled, new turns, individual local tool calls, and subagent activity are reported without prompts, command arguments, or tool output. Plugin installation alone does not enable Codex reporting. |
-| Claude Code | No adapter included | Not automatically detected or synchronized. |
-| Hermes Agent | No adapter included | Not automatically detected or synchronized. |
+| Codex CLI | Optional hook reporter included | Select **Connect** in the panel to merge hooks safely, then review/trust them with `/hooks`. New turns, local tool calls, and subagent activity are reported without prompts, command arguments, or tool output. |
+| Claude Code, Hermes, OpenClaw, or another runtime | Manual CLI/API only | Use the local writer to mark chosen lifecycle checkpoints; no bundled adapter or automatic discovery is included yet. See [manual reporting](docs/USAGE.md#manual-reporting-for-claude-code-hermes-and-openclaw). |
 
+The panel's **Connect** page checks only known reporter config paths when opened; it does
+not enumerate running processes, read agent docs, or make network requests. Connect
+buttons are explicit and reversible: Codex config is backed up with owner-only permissions,
+and an existing Pi extension is never overwritten. The Pi reporter is not enabled at install.
 The optional Codex reporter is `bin/codex-hook.py`; see
 [`examples/codex-hooks/hooks.json`](examples/codex-hooks/hooks.json) for the hook
 registrations. Codex requires trust review for non-managed hooks; use `/hooks` in the
@@ -358,9 +363,9 @@ clean:
   child processes; the example extension stands down when it sees that variable, so a run is never
   reported twice (and the host's richer report is the one that survives).
 
-`examples/pi-extension/agent-pipeline.ts` is a working reporter for the **pi** coding agent: drop it
-in `~/.pi/agent/extensions/` and every pi session — terminal and headless — appears in the widget,
-with the prompt as the title, per-tool updates, and real token usage at the end.
+`examples/pi-extension/agent-pipeline.ts` is a working reporter for the **pi** coding agent. The
+Connect page installs it to `~/.pi/agent/extensions/`; after Pi reloads, sessions appear with a
+generic prompt-free title, per-tool updates, and reported token usage.
 
 ## Interaction
 
@@ -379,8 +384,9 @@ the newest request errored or a step reported a warning.
 
 ```bash
 omarchy plugin add https://github.com/ericyhm80/omarchy-agent-pipeline --enable
-omarchy plugin enable io.github.ericyhm80.agent-pipeline --section center
-agent-pipeline demo        # see it with sample data
+# Open the bar widget and choose CONNECT to opt in to a runtime reporter.
+# Preview the panel with sample data (the plugin add command does not install the CLI to PATH):
+~/.config/omarchy/plugins/io.github.ericyhm80.agent-pipeline/bin/agent-pipeline demo
 ```
 
 ## Development note
@@ -391,17 +397,22 @@ modules are cached and a plugin rescan alone will not pick them up.
 
 ## Privacy
 
-The widget only reads the local state file above. It makes no network requests,
-collects nothing, and sends nothing anywhere. Whatever your agent writes into
-that file is what you see.
+The panel only reads the local state file above and makes no network requests. Optional
+reporters write bounded operational metadata to that local file; bundled Codex and Pi
+reporters omit prompt text, command arguments, tool output, transcripts, and keys.
+Nothing is uploaded by the plugin. See the [customer usage guide](docs/USAGE.md).
 
 ## Uninstall
 
+First use the panel's **REMOVE** action for each connected reporter, then uninstall:
+
 ```bash
 omarchy plugin remove io.github.ericyhm80.agent-pipeline
-rm -f ~/.local/bin/agent-pipeline
-rm -rf ~/.local/state/omarchy/agent-pipeline
 ```
+
+Optionally remove `~/.local/state/omarchy/agent-pipeline/` if you also want to erase
+local history. Do not delete `~/.local/bin/agent-pipeline` unless you have verified it
+is the Agent Pipeline symlink; the setup helper removes only the link it created.
 
 ## License
 

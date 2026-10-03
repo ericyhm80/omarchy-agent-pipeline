@@ -29,7 +29,7 @@ export default function (pi) {
   // (id, version, time, pid); the writer records what is on disk NOW next to it,
   // and the panel says whether the scores can be trusted yet.
   const EXT_ID = "agent-pipeline";
-  const EXT_VERSION = "0.7.7";
+  const EXT_VERSION = "0.7.8";
   const LOADED_AT = new Date().toISOString();
   function procPid() {
     try { return Number(process.pid) || 0; } catch { return 0; }
@@ -89,8 +89,8 @@ export default function (pi) {
     fallback = false;
     usage = null;
     running = true;
-    const prompt = String(event?.prompt ?? "");
-    const title = prompt.trim().split("\n")[0].slice(0, 120);
+    // Never persist prompt text or a prompt-derived title in shared telemetry.
+    const title = "Pi turn";
     let provider = "", modelId = "";
     try {
       provider = String(ctx?.model?.provider ?? "");
@@ -105,7 +105,7 @@ export default function (pi) {
       env: { provider, model: modelId },
       instrument: { id: EXT_ID, extVersion: EXT_VERSION, loadedAt: LOADED_AT, pid: procPid() },
       nodes: [
-        { id: "input", status: "ok", detail: prompt.length + " chars", ms: 0 },
+        { id: "input", status: "ok", detail: "user turn", ms: 0 },
         { id: "router", status: "skipped", detail: "cli: no router stage", ms: 0 },
         { id: "context", status: "skipped", detail: "cli: session carries context", ms: 0 },
         { id: "memory", status: "skipped", detail: "cli: retrieval via tools", ms: 0 }

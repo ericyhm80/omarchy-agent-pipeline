@@ -11,4 +11,8 @@ echo
 echo "== Codex CLI hooks — privacy + pipeline integration =="
 python3 test_codex_hook.py
 echo
+echo "== Explicit reporter setup — config safety + lifecycle =="
+python3 test_agent_pipeline_setup.py
+node test_pi_extension_privacy.mjs
+echo
 echo "all agent-pipeline tests passed"
