@@ -32,12 +32,18 @@ import datetime as dt
 import fcntl
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 
 STATE_HOME = Path(os.environ.get("XDG_STATE_HOME") or (Path.home() / ".local" / "state"))
 STORE = STATE_HOME / "omarchy" / "agent-pipeline" / "requests.json"
 MAX_REQUESTS = 30
+# Facts are bounded like everything else here: a run with more tool calls than this
+# keeps its newest entries. The robustness penalty is capped per request anyway
+# (Model.js HEALTH.robustness.cap), so truncation can only affect runs that have
+# already hit the cap.
+TOOL_LOG_MAX = 400
 
 # Shipped default architecture: the pipeline this widget was built around. Data
 # can override it entirely, so the widget stays useful for other runtimes.
@@ -119,7 +125,78 @@ def blank(rid: str) -> dict:
     return {"id": rid, "at": now(), "title": "", "agent": "", "state": "running",
             "taskClass": "", "route": "", "model": "",
             "tokens": {"input": 0, "output": 0, "cacheRead": 0, "costUsd": 0.0},
-            "nodes": [], "edges": [], "issues": [], "signals": []}
+            "nodes": [], "edges": [], "issues": [], "signals": [], "toolLog": []}
+
+
+def parse_ts(value):
+    """A recorded time in any shape this pipeline sees → aware UTC datetime.
+
+    pi writes epoch-milliseconds for tool results; this store writes ISO strings.
+    Booleans are rejected on purpose: `True` is not a timestamp, and silently
+    treating it as one would invent a time.
+    """
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        seconds = (value / 1000.0) if abs(value) > 1e11 else float(value)
+        try:
+            return dt.datetime.fromtimestamp(seconds, dt.timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.timezone.utc)
+
+
+def load_session_facts(path: Path) -> list[dict]:
+    """Tool results recorded by pi itself: [{at, tool, ok}] in file order.
+
+    The session log is independent evidence: it survives the instrumentation being
+    reloaded, replaced or never loaded at all. Undecodable lines are skipped, never
+    guessed at.
+    """
+    facts: list[dict] = []
+    with path.open(encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(entry, dict) or entry.get("type") != "message":
+                continue
+            msg = entry.get("message") or {}
+            if msg.get("role") != "toolResult":
+                continue
+            at = parse_ts(msg.get("timestamp"))
+            if at is None:
+                continue
+            facts.append({"at": at, "tool": str(msg.get("toolName") or "tool"),
+                          "ok": not msg.get("isError")})
+    return facts
+
+
+def uncancelled_tool_failures(log: list[dict]) -> int:
+    """How many recorded tool failures no later success of the SAME tool absorbed.
+
+    Deliberately the same rule as the widget's Model.js: one success cancels one
+    outstanding failure per tool name, first-come-first-cancelled. Kept here so the
+    dry run can say what the scorer will conclude *before* anything is written.
+    """
+    pending: dict[str, int] = {}
+    for entry in log:
+        tool = str((entry or {}).get("tool") or "tool")
+        if (entry or {}).get("ok"):
+            if pending.get(tool):
+                pending[tool] -= 1
+            continue
+        pending[tool] = pending.get(tool, 0) + 1
+    return sum(n for n in pending.values() if n > 0)
 
 
 def main() -> int:
@@ -188,6 +265,23 @@ def main() -> int:
     sg.add_argument("--weight", type=float, default=None,
                     help="override the default penalty for this kind (see the widget's Model.js)")
 
+    rc = sub.add_parser("reconcile", help="write missing tool FACTS from a pi session log "
+                                           "(dry run unless --apply)")
+    rc.add_argument("--session-log", dest="session_log", required=True,
+                    help="pi session JSONL (the runtime's own record of every tool result)")
+    rc.add_argument("--id", action="append", default=None,
+                    help="request id to reconcile; repeatable. Omit to use --window")
+    rc.add_argument("--window", type=int, default=20,
+                    help="how many of the newest requests to consider (default 20, the scored window)")
+    rc.add_argument("--apply", action="store_true",
+                    help="write the reconstructed facts (backs the store up first)")
+    rc.add_argument("--dry-run", dest="dry_run", action="store_true",
+                    help="explicitly do NOT write anything (this is the default; passing it with "
+                         "--apply is refused rather than guessed at)")
+    rc.add_argument("--verify", action="store_true",
+                    help="for requests that ALREADY carry facts, re-derive them and compare")
+    rc.add_argument("--json", action="store_true", help="machine-readable report")
+
     sub.add_parser("clear", help="remove all recorded requests")
     sub.add_parser("demo", help="write one sample pipeline for a first look")
 
@@ -215,7 +309,8 @@ def main() -> int:
             if row is None:
                 row = {"id": args.id, "at": now(), "title": "", "agent": "", "state": "running",
                        "taskClass": "", "route": "", "model": "",
-                       "tokens": {"input": 0, "output": 0, "cacheRead": 0, "costUsd": 0.0}, "steps": []}
+                       "tokens": {"input": 0, "output": 0, "cacheRead": 0, "costUsd": 0.0},
+                       "steps": [], "toolLog": []}
                 data["requests"].append(row)
             row.setdefault("steps", []).append({
                 "name": args.name, "status": args.status, "detail": args.detail, "ms": round(args.ms, 1),
@@ -348,7 +443,7 @@ def main() -> int:
                 row = {"id": rid, "at": now(), "title": "", "agent": "", "state": "running",
                        "taskClass": "", "route": "", "model": "",
                        "tokens": {"input": 0, "output": 0, "cacheRead": 0, "costUsd": 0.0},
-                       "nodes": [], "edges": [], "issues": []}
+                       "nodes": [], "edges": [], "issues": [], "toolLog": []}
                 data["requests"].append(row)
             if isinstance(patch.get("architecture"), dict):
                 row["architecture"] = patch["architecture"]
@@ -381,6 +476,14 @@ def main() -> int:
             for sig in patch.get("signals") or []:
                 if isinstance(sig, dict):
                     row.setdefault("signals", []).append(sig)
+            facts = patch.get("toolLog")
+            if isinstance(facts, list):
+                entries = [e for e in facts if isinstance(e, dict) and e.get("tool")]
+                if entries:
+                    merged = list(row.get("toolLog") or []) + entries
+                    row["toolLog"] = merged[-TOOL_LOG_MAX:]
+            if isinstance(patch.get("toolLogSource"), str):
+                row["toolLogSource"] = patch["toolLogSource"]
             if patch.get("archReset"):
                 data["architecture"] = DEFAULT_ARCHITECTURE
             save(data)
@@ -415,6 +518,121 @@ def main() -> int:
                 entry["weight"] = args.weight
             row.setdefault("signals", []).append(entry)
             save(data)
+            return 0
+        return with_lock(op)
+
+    if args.cmd == "reconcile":
+        if args.apply and args.dry_run:
+            print("error: --apply and --dry-run contradict each other; refusing", file=sys.stderr)
+            return 1
+
+        def op() -> int:
+            path = Path(args.session_log)
+            if not path.is_file():
+                print(f"error: no session log at {path}", file=sys.stderr)
+                return 1
+            try:
+                facts = load_session_facts(path)
+            except OSError as exc:
+                print(f"error: cannot read session log: {exc}", file=sys.stderr)
+                return 1
+            data = load()
+            rows = data["requests"]
+            if args.id:
+                wanted = {str(i) for i in args.id}
+                targets = [(i, r) for i, r in enumerate(rows) if str(r.get("id")) in wanted]
+                for miss in sorted(wanted - {str(r.get("id")) for _, r in targets}):
+                    print(f"note: no such request: {miss}", file=sys.stderr)
+            else:
+                targets = list(enumerate(rows))[max(0, len(rows) - args.window):]
+
+            def shape(entries) -> str:
+                return "".join("." if (e or {}).get("ok") else "X" for e in entries)
+
+            report: list[dict] = []
+            writing = 0
+            for _, row in targets:
+                rid = str(row.get("id") or "")
+                start = parse_ts(row.get("at"))
+                duration = row.get("durationMs")
+                end = (start + dt.timedelta(milliseconds=float(duration))
+                       if (start is not None and duration is not None) else None)
+                window = [f for f in facts if start <= f["at"] <= end] if (start is not None and end is not None) else []
+                derived = [{"tool": f["tool"], "ok": f["ok"]} for f in window]
+                existing = [e for e in (row.get("toolLog") or []) if isinstance(e, dict) and e.get("tool")]
+                sigs = row.get("signals") or []
+                sig_fail = sum(1 for s in sigs if str((s or {}).get("kind")) == "tool_failure")
+                sig_rec = sum(1 for s in sigs if str((s or {}).get("kind")) == "tool_recovered")
+                item = {
+                    "id": rid, "at": str(row.get("at") or ""), "state": str(row.get("state") or ""),
+                    "window": None if end is None else f"{start.isoformat()}..{end.isoformat()}",
+                    "toolResults": len(derived),
+                    "failures": sum(1 for f in derived if not f["ok"]),
+                    "uncancelled": uncancelled_tool_failures(derived),
+                    "signals": {"tool_failure": sig_fail, "tool_recovered": sig_rec},
+                    "existingFacts": len(existing),
+                    "action": "none",
+                }
+                if existing:
+                    if args.verify:
+                        if not derived:
+                            item["action"] = "verify-not-reconstructable"
+                        elif len(existing) == len(derived) and shape(existing) == shape(derived):
+                            item["action"] = "verify-match"
+                        else:
+                            item["action"] = "verify-MISMATCH"
+                            item["recorded"] = shape(existing)[:120]
+                            item["derived"] = shape(derived)[:120]
+                    else:
+                        item["action"] = "keep-existing-facts"
+                elif start is None or end is None:
+                    item["action"] = "skip-no-window"
+                elif not derived:
+                    item["action"] = "skip-no-tool-results"
+                    if sig_fail or sig_rec:
+                        item["warning"] = ("record claims tool signals but the session log shows no "
+                                           "tool result inside its window")
+                else:
+                    item["action"] = "would-write-facts"
+                    if args.apply:
+                        row["toolLog"] = derived
+                        row["toolLogSource"] = (f"reconstructed from {path.name} "
+                                                f"[{start.isoformat()}..{end.isoformat()}] "
+                                                f"by agent-pipeline reconcile {now()}")
+                        item["action"] = "wrote-facts"
+                        writing += 1
+                report.append(item)
+
+            backup = None
+            if args.apply and writing:
+                stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                backup = STORE.with_name(STORE.name + f".bak-{stamp}")
+                if backup.exists():
+                    print(f"error: refusing to overwrite existing backup {backup}", file=sys.stderr)
+                    return 1
+                shutil.copy2(STORE, backup)
+                save(data)
+
+            if args.json:
+                print(json.dumps({"sessionLog": str(path), "totalToolResults": len(facts),
+                                  "write": bool(args.apply), "backup": str(backup) if backup else None,
+                                  "rows": report}, ensure_ascii=False, indent=2))
+                return 0
+            print(f"session log: {path} ({len(facts)} tool result(s) recorded)")
+            for item in report:
+                extra = ""
+                if item["action"] == "verify-MISMATCH":
+                    extra = f" recorded={item['recorded']} derived={item['derived']}"
+                if item.get("warning"):
+                    extra += "  ! " + item["warning"]
+                print(f"  {item['id']:<28} {item['state']:<8} toolResults={item['toolResults']:<3} "
+                      f"failures={item['failures']:<2} uncancelled={item['uncancelled']:<2} "
+                      f"signals(tf={item['signals']['tool_failure']},tr={item['signals']['tool_recovered']}) "
+                      f"facts={item['existingFacts']:<3} {item['action']}{extra}")
+            if args.apply:
+                print(f"wrote facts for {writing} request(s)" + (f"; backup {backup}" if backup else ""))
+            else:
+                print("dry run: nothing written (pass --apply to write the reconstructed facts)")
             return 0
         return with_lock(op)
 

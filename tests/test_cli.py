@@ -70,6 +70,106 @@ def main() -> int:
         ok("unknown id auto-created", "signals" in rows["R2"] and len(rows["R2"]["signals"]) == 1)
         ok("no leftover temp file", not (store.parent / "requests.tmp").exists())
 
+        # ---- tool FACTS + the reconcile command that can reconstruct them -----
+        def reload() -> dict:
+            data_ = json.loads(store.read_text(encoding="utf-8"))
+            return {r["id"]: r for r in data_["requests"]}
+
+        run("patch", json.dumps({"id": "R1", "toolLog": [
+            {"tool": "bash", "ok": False, "ms": 3}, {"tool": "bash", "ok": True, "ms": 4}]}))
+        ok("tool facts appended in order", [e["ok"] for e in reload()["R1"]["toolLog"]] == [False, True],
+           reload()["R1"]["toolLog"])
+        run("patch", json.dumps({"id": "R1", "toolLog": [{"ok": True}, {"tool": ""}, "nope"],
+                                 "toolLogSource": "unit test"}))
+        ok("facts without a tool name are dropped, not counted", len(reload()["R1"]["toolLog"]) == 2)
+        ok("the provenance of reconstructed facts is stored", reload()["R1"]["toolLogSource"] == "unit test")
+        run("patch", json.dumps({"id": "R1", "toolLog": [{"tool": "bash", "ok": True,
+                                                              "n": n} for n in range(450)]}))
+        capped = reload()["R1"]["toolLog"]
+        ok("the fact log is bounded", len(capped) == 400, len(capped))
+        ok("the bound keeps the NEWEST facts", capped[-1]["n"] == 449 and capped[0]["n"] == 50, capped[0])
+
+        # a pi session log is independent evidence: build one and reconstruct from it
+        import datetime as dt
+        epoch_ms = 1790000000000
+        started = dt.datetime.fromtimestamp(epoch_ms / 1000, dt.timezone.utc)
+        log_path = Path(tmp) / "session.jsonl"
+        log_path.write_text("\n".join([
+            json.dumps({"type": "session", "version": 3, "id": "s1"}),
+            json.dumps({"type": "message", "message": {"role": "user", "content": "hi"}}),
+            json.dumps({"type": "message", "message": {"role": "toolResult", "toolName": "bash",
+                                                         "isError": True, "timestamp": epoch_ms}}),
+            json.dumps({"type": "message", "message": {"role": "toolResult", "toolName": "edit",
+                                                         "isError": False, "timestamp": epoch_ms + 5000}}),
+            json.dumps({"type": "message", "message": {"role": "toolResult", "toolName": "bash",
+                                                         "isError": False, "timestamp": epoch_ms + 11000}}),
+            "{not json at all",
+        ]), encoding="utf-8")
+        run("patch", json.dumps({"id": "R3", "state": "done", "durationMs": 60000,
+                                 "signals": [{"dimension": "robustness", "kind": "tool_failure",
+                                              "level": "warn", "detail": "tool error in bash"}]}))
+        store_data = json.loads(store.read_text(encoding="utf-8"))
+        for row in store_data["requests"]:
+            if row["id"] == "R3":
+                row["at"] = started.isoformat()
+        store.write_text(json.dumps(store_data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        dry = subprocess.run([sys.executable, str(CLI), "reconcile", "--session-log", str(log_path),
+                              "--id", "R3", "--json"], env=env, capture_output=True, text=True)
+        report = json.loads(dry.stdout)
+        row3 = report["rows"][0]
+        ok("reconcile reads the session log", report["totalToolResults"] == 3, report["totalToolResults"])
+        ok("reconcile derives facts in order", row3["toolResults"] == 3 and row3["failures"] == 1,
+           (row3["toolResults"], row3["failures"]))
+        ok("reconcile derives the absorption (bash failed once, then succeeded)",
+           row3["uncancelled"] == 0, row3["uncancelled"])
+        ok("reconcile is a dry run unless asked", row3["action"] == "would-write-facts" and not row3["existingFacts"],
+           row3["action"])
+        ok("a dry run writes nothing", not reload()["R3"].get("toolLog"), reload()["R3"].get("toolLog"))
+
+        applied = subprocess.run([sys.executable, str(CLI), "reconcile", "--session-log", str(log_path),
+                                  "--id", "R3", "--apply", "--json"], env=env, capture_output=True, text=True)
+        report = json.loads(applied.stdout)
+        ok("--apply writes the facts", report["rows"][0]["action"] == "wrote-facts", report["rows"][0]["action"])
+        ok("--apply backs the store up first", bool(report["backup"]) and Path(report["backup"]).exists(),
+           report["backup"])
+        written = reload()["R3"]
+        ok("facts and provenance landed in the store",
+           len(written["toolLog"]) == 3 and "reconstructed from session.jsonl" in written["toolLogSource"],
+           written.get("toolLogSource"))
+        ok("the failure claim is kept as evidence, never rewritten",
+           len(written["signals"]) == 1 and written["signals"][0]["kind"] == "tool_failure")
+
+        verify = subprocess.run([sys.executable, str(CLI), "reconcile", "--session-log", str(log_path),
+                                 "--id", "R3", "--verify", "--json"], env=env, capture_output=True, text=True)
+        ok("verify agrees with the reconstruction it just wrote",
+           json.loads(verify.stdout)["rows"][0]["action"] == "verify-match",
+           json.loads(verify.stdout)["rows"][0])
+
+        tampered = reload()
+        tampered["R3"]["toolLog"][2]["ok"] = False
+        store.write_text(json.dumps({"requests": list(tampered.values())}, ensure_ascii=False),
+                         encoding="utf-8")
+        verify2 = subprocess.run([sys.executable, str(CLI), "reconcile", "--session-log", str(log_path),
+                                  "--id", "R3", "--verify", "--json"], env=env, capture_output=True, text=True)
+        ok("verify can fail: a tampered fact is caught",
+           json.loads(verify2.stdout)["rows"][0]["action"] == "verify-MISMATCH",
+           json.loads(verify2.stdout)["rows"][0])
+
+        missing = subprocess.run([sys.executable, str(CLI), "reconcile", "--session-log",
+                                  str(Path(tmp) / "nope.jsonl")], env=env, capture_output=True, text=True)
+        ok("a missing session log fails loudly instead of guessing", missing.returncode == 1, missing.returncode)
+
+        explicit = subprocess.run([sys.executable, str(CLI), "reconcile", "--session-log", str(log_path),
+                                   "--id", "R3", "--dry-run"], env=env, capture_output=True, text=True)
+        ok("--dry-run is accepted and writes nothing",
+           explicit.returncode == 0 and "dry run" in explicit.stdout and "Wrote facts" not in explicit.stdout,
+           explicit.stdout[-120:])
+        contra = subprocess.run([sys.executable, str(CLI), "reconcile", "--session-log", str(log_path),
+                                 "--id", "R3", "--dry-run", "--apply"], env=env,
+                                capture_output=True, text=True)
+        ok("contradictory flags are refused, not guessed", contra.returncode == 1, contra.returncode)
+
     print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0
 

@@ -57,7 +57,7 @@ invented — a dimension with no evidence reads `n/a`, never a perfect score:
 | dimension | the question it answers | evidence it is scored from |
 |---|---|---|
 | **stability** | does a run do its job? | errored runs, warnings, failed stages, retry / timeout / rate-limit / provider-outage signals |
-| **robustness** | does it degrade **and recover** gracefully? | errors with and without a fallback, tool failures (each cancelled by a matching `tool_recovered`), degraded runs |
+| **robustness** | does it degrade **and recover** gracefully? | errors with and without a fallback, **tool failures derived from the recorded tool facts** (a later success of the same tool absorbs an earlier failure), degraded runs |
 | **security** | does it respect the gate and contain risk? | the security signals a runtime reports: gate bypass, secret exposure, sandbox / policy violations, prompt injection, risky commands |
 
 Each score is `100` minus the penalties of its signals and run outcomes (the
@@ -77,20 +77,56 @@ override it for one signal.
 
 ### A failure that was absorbed is not a degradation
 
-`tool_recovered` is the one signal that cancels instead of adding. A runtime emits
-it when a tool that failed earlier in the *same request* later succeeds; one
-recovery removes the most recent unmatched `tool_failure` (kind-matched, never
-across requests, and a no-op when there is nothing to cancel). A whole-run
-`recovered` — the run finished after a fallback — is a different claim and does
+How does the widget know a failure was absorbed? It reads the recorded **facts**:
+the `toolLog` array of a request holds one entry per finished tool call, in
+completion order.
+
+```json
+"toolLog": [ { "tool": "bash", "ok": false, "ms": 1200 },
+              { "tool": "bash", "ok": true,  "ms": 980 } ]
+```
+
+A failure is absorbed when a later call of the **same tool** succeeds in the same
+request — one success absorbs one earlier failure. That is derived at scoring time,
+so nothing has to be negotiated between two signals, and the derivation cannot
+depend on the state of the process that recorded it.
+
+Why facts and not a claim: the first version of this fix had the runtime keep a
+per-tool counter in its own memory and emit a `tool_recovered` signal on a retry.
+That counter lives inside one process. A reload started it from zero, and every
+failure recorded before the reload could never be cancelled afterwards — the
+panel showed 68, then 60, then 84 for runs whose failures a session log shows were
+absorbed seconds later, and each time the number could only be repaired by
+hand-writing recovery claims into the store. A metric that needs manual backfill
+is not a metric. Facts survive the reload; a counter does not.
+
+Backwards compatible: a request **without** `toolLog` still scores by the old
+claim rule (a `tool_recovered` signal cancels the most recent unmatched
+`tool_failure` in the same request, kind-matched, never across requests, and a
+no-op when there is nothing to cancel). When facts *are* present the tool signals
+are ignored for scoring — counting both would double the penalty — but a
+`tool_failure` signal is still recorded and shown as evidence. A whole-run
+`recovered` (the run finished after a fallback) is a different claim and does
 **not** cancel tool failures.
 
-Why it exists: on 2026-10-02 this widget showed robustness **68** for an entire
-window because one 31-minute run recorded four tool errors that were all absorbed
-and worked around. Every probe and retried edit would have stayed on the score
-forever, which trains you to ignore the number. The failure itself is still
-recorded either way; only the score and the driver list drop the cancelled ones.
-An unabsorbed failure — nothing succeeded after it — still costs its full weight,
-so the dimension can still go down.
+The failure itself is recorded and displayed either way; only the score and the
+driver list drop the absorbed ones. An unabsorbed failure — nothing succeeded
+after it — still costs its full weight, so the dimension can still go down.
+
+Older requests can be given their facts from the runtime's own session log, which
+is independent evidence (it survives the instrumentation being replaced):
+
+```bash
+agent-pipeline reconcile --session-log ~/.pi/agent/sessions/<id>.jsonl --dry-run
+agent-pipeline reconcile --session-log ~/.pi/agent/sessions/<id>.jsonl --apply
+agent-pipeline reconcile --session-log ~/.pi/agent/sessions/<id>.jsonl --verify
+```
+
+It writes nothing without `--apply`; `--apply` backs the store up first and tags
+the request with `toolLogSource` (where the facts came from). `--verify`
+re-derives the facts of requests that already have them and compares — so the
+reconstruction can be caught being wrong. Requests whose window contains no tool
+results are skipped with a warning, never filled in with a guess.
 
 ## The window, not just one run
 
@@ -142,6 +178,8 @@ $XDG_STATE_HOME/omarchy/agent-pipeline/requests.json      # usually ~/.local/sta
       ],
       "edges": [ { "from": "input", "to": "router" }, { "from": "router", "to": "memory" } ],
       "issues": [ { "level": "warn", "node": "model", "detail": "codex hit its limit, fell back to GLM" } ],
+      "toolLog": [ { "tool": "bash", "ok": false, "ms": 1200 },
+                   { "tool": "bash", "ok": true,  "ms": 980 } ],
       "signals": [
         { "dimension": "stability",  "kind": "provider_outage",  "level": "warn", "detail": "z.ai 502" },
         { "dimension": "robustness", "kind": "fallback_used",    "level": "info", "detail": "continued on GLM" },
@@ -159,6 +197,8 @@ pipeline graph. The panel picks the request's graph when it has one and the glob
 Omit `architecture` and the widget falls back to the pipeline it ships with, so a runtime only
 has to write `requests`. `status` accepts `ok`, `running`, `warn`, `error`, `skipped`;
 `state` accepts `running`, `done`, `error`; `issues[].level` accepts `info`, `warn`, `error`.
+`toolLog[]` accepts `{tool, ok, ms}` — the tool facts robustness is derived from; a request
+without it is scored from its signals instead (see above).
 `signals[].dimension` accepts `stability`, `robustness`, `security`; `signals[].kind` is one of
 the documented kinds (`provider_outage`, `retry`, `timeout`, `rate_limit`, `model_error`,
 `fallback_used`, `tool_failure`, `tool_recovered`, `degraded`, `recovered`, `secret_exposure`,
@@ -185,6 +225,8 @@ agent-pipeline node  --id "$REQ" --node tools  --status ok --detail "2 tool call
 agent-pipeline issue  --id "$REQ" --level warn --node model --detail "codex hit its limit, fell back to GLM"
 agent-pipeline signal --id "$REQ" --dimension robustness --kind fallback_used --level info --detail "continued on GLM"
 agent-pipeline signal --id "$REQ" --dimension security --kind human_gate_bypass --level error --detail "L2 sent without sign-off"
+# tool facts: one line per finished tool call (a retry of the same tool absorbs the failure)
+agent-pipeline patch '{"id":"'"$REQ"'","toolLog":[{"tool":"bash","ok":false,"ms":1200}]}'
 agent-pipeline end   --id "$REQ" --state done --duration-ms 15500 \
   --tokens-json '{"input":352,"output":166,"cacheRead":4928,"costUsd":0.00028}' \
   --metrics-json '{"toolCalls":2,"apiCalls":3,"fallbacks":1}' --env-json '{"provider":"z.ai"}'
@@ -193,7 +235,9 @@ agent-pipeline end   --id "$REQ" --state done --duration-ms 15500 \
 Recording a node also marks the edge that feeds it as traversed, so edges never have to be
 listed by hand. `step --name ...` still works and renders as a plain list for runtimes that do
 not describe a graph. Other subcommands: `emit --json '<object>'` (whole request at once),
-`clear`, `demo` (sample graph + request).
+`reconcile --session-log <pi session>` (write missing tool facts from the runtime's own record —
+dry run unless `--apply`, and `--verify` re-derives facts that are already there), `clear`,
+`demo` (sample graph + request).
 
 ## Inspecting earlier runs
 

@@ -72,6 +72,53 @@ ok("run-level `recovered` does not cancel a tool failure", h.robustness.score ==
 h = Model.computeHealth([req({ signals: [robRec] }), req({ signals: [robFail] })]);
 ok("recovery does not leak into another request", h.robustness.score === 92, h.robustness.score);
 
+// --- FACTS, not claims (0.7.3): absorption is derived from what happened ------
+// `toolLog` records every finished tool call. A failure is absorbed when a later
+// call of the SAME tool succeeded. The `tool_recovered` claim is no longer needed,
+// and is ignored when facts are on record (counting both would double the penalty).
+const fact = (tool, ok) => ({ tool: tool, ok: ok, ms: 12 });
+const failBash = fact("bash", false);
+
+h = Model.computeHealth([req({ toolLog: [failBash, fact("bash", true)] })]);
+ok("facts: a failure absorbed by the same tool costs nothing", h.robustness.score === 100, h.robustness.score);
+ok("facts: no driver when nothing is uncancelled", h.robustness.drivers.length === 0, JSON.stringify(h.robustness.drivers));
+ok("facts: the request still counts as evidence", h.robustness.coverage === 1, h.robustness.coverage);
+
+h = Model.computeHealth([req({ toolLog: [failBash, fact("edit", true)] })]);
+ok("facts: another tool's success is not a recovery", h.robustness.score === 92, h.robustness.score);
+
+h = Model.computeHealth([req({ toolLog: [fact("bash", true), failBash] })]);
+ok("facts: a success BEFORE the failure absorbs nothing", h.robustness.score === 92, h.robustness.score);
+
+h = Model.computeHealth([req({ toolLog: [failBash, failBash, fact("bash", true)] })]);
+ok("facts: 2 failures, 1 retry => 1 still costs", h.robustness.score === 92, h.robustness.score);
+ok("facts: driver counts the uncancelled failure", h.robustness.drivers[0].key === "tool_failure" && h.robustness.drivers[0].count === 1, JSON.stringify(h.robustness.drivers));
+
+h = Model.computeHealth([req({ toolLog: [fact("bash", false), fact("edit", false), fact("bash", true)] })]);
+ok("facts: cancellation is per tool name", h.robustness.score === 92, h.robustness.score);
+
+// the real 2026-10-03 record pi-murb7gok-1afv: 2 bash failures, both absorbed 11s and
+// 2s later, written by the pre-fix extension so no recovery claim exists. R read 84.
+h = Model.computeHealth([req({ signals: [robFail, robFail],
+                               toolLog: [failBash, fact("bash", true), failBash, fact("bash", true)] })]);
+ok("facts beat stale claims: the 84% record derives to 100", h.robustness.score === 100, h.robustness.score);
+
+h = Model.computeHealth([req({ signals: [robFail, robFail], toolLog: [failBash, failBash] })]);
+ok("facts beat claims the other way too (no double count)", h.robustness.score === 84, h.robustness.score);
+
+h = Model.computeHealth([req({ toolLog: [failBash, fact("bash", true)],
+                               signals: [robFail, { dimension: "robustness", kind: "degraded", level: "info" }] })]);
+ok("facts + other robustness kinds still count", h.robustness.score === 98, h.robustness.score);
+
+h = Model.computeHealth([req({ toolLog: [], signals: [robFail] })]);
+ok("an empty log is not evidence: the claim rule still applies", h.robustness.score === 92, h.robustness.score);
+
+h = Model.computeHealth([req({ toolLog: [fact("bash", true), fact("edit", true)] })]);
+ok("facts with no failure score 100", h.robustness.score === 100, h.robustness.score);
+
+h = Model.computeHealth([req({ state: "running", durationMs: 0, toolLog: [failBash] })]);
+ok("facts in a running request are not judged yet", h.robustness.score === null, h.robustness.score);
+
 // three errors cross the alert floor
 h = Model.computeHealth([req({ state: "error" }), req({ state: "error" }), req({ state: "error" })]);
 ok("repeated errors alert", h.alert === true && h.stability.level === "alert", h.alertReason);

@@ -299,24 +299,65 @@ function applySignals(signals, dimension, bag) {
   return total
 }
 
-// Robustness is the one dimension with a *cancelling* signal. The runtime emits
-// `tool_recovered` when a tool that failed earlier in the same run later succeeds:
-// an absorbed failure is not a degradation, and scoring it as one made every probe,
-// retried edit and no-match grep a permanent alarm. Measured 2026-10-02: one
-// 31-minute run with 4 absorbed tool errors pinned R at 68 for the whole window.
+// Robustness asks "did it degrade *and recover* gracefully?", so a failure that was
+// absorbed must not cost anything. Two shapes of evidence can say so, and facts win:
 //
-// Cancellation is explicit and kind-matched: one `tool_recovered` removes the most
-// recent uncancelled `tool_failure` in the same request, and is a no-op when there
-// is nothing to cancel. A plain `recovered` (the whole run finished after a
-// fallback) does NOT cancel tool failures — different claim, different signal.
-// Cancelled failures still live in the stored request as evidence; they are only
-// kept out of the score and out of the driver list.
-function applyRobustnessSignals(signals, bag) {
+//   * `toolLog` — FACTS the runtime wrote as it happened: one entry per finished tool
+//     call, in completion order ({tool, ok, ms}). Absorption is DERIVED from them: a
+//     failure is absorbed when a later call of the SAME tool succeeded in the same
+//     request. Nothing else is inferred.
+//   * `signals` — the runtime's own observations, including the claim `tool_recovered`.
+//
+// Why facts replaced the claim (measured 2026-10-03): the old rule made the runtime
+// keep a per-tool counter in ITS OWN MEMORY and emit `tool_recovered` when a retry
+// succeeded. A counter does not survive a reload, and a reloaded runtime cannot
+// cancel failures recorded before it — so R read 84% for a run whose two failures the
+// session log shows were absorbed 11s and 2s later, and the corrupt number could only
+// be "fixed" by hand-writing recoveries into the store. Three manual backfills is a
+// measurement that does not work. Facts survive the reload that a counter does not,
+// and they cannot be improved by hand without becoming a different claim.
+//
+// Backwards compatible on purpose: a request without facts still scores by the old
+// claim rule, so the whole recorded history stays readable and comparable.
+function toolFacts(request) {
+  var log = request && request.toolLog
+  if (!Array.isArray(log) || !log.length) return null
+  return log
+}
+
+// One success cancels one outstanding failure per tool name (first-come-first-cancelled),
+// exactly the rule the runtime used to implement in memory.
+function uncancelledToolFailures(log) {
+  var pending = {}
+  var total = 0
+  for (var i = 0; i < log.length; i++) {
+    var e = log[i] || {}
+    if (!("ok" in e)) continue
+    var tool = String(e.tool || "tool")
+    if (e.ok) {
+      if (pending[tool]) pending[tool] -= 1
+      continue
+    }
+    pending[tool] = (pending[tool] || 0) + 1
+  }
+  for (var k in pending) {
+    if (Object.prototype.hasOwnProperty.call(pending, k) && pending[k] > 0) total += pending[k]
+  }
+  return total
+}
+
+function applyRobustnessSignals(signals, bag, facts) {
+  var derived = facts ? uncancelledToolFailures(facts) : null
   var pending = []
   for (var i = 0; i < signals.length; i++) {
     var sig = signals[i] || {}
     if (String(sig.dimension || "") !== "robustness") continue
     var kind = String(sig.kind || "custom")
+    // With facts on record the score is derived from them, so the tool claims are
+    // ignored here — counting both would double the penalty. The stored signal stays
+    // visible as evidence, and a plain `recovered` (whole run survived a fallback)
+    // never cancelled a tool failure anyway.
+    if (derived !== null && (kind === "tool_failure" || kind === "tool_recovered")) continue
     if (kind === "tool_recovered") {
       for (var j = pending.length - 1; j >= 0; j--) {
         if (pending[j].kind === "tool_failure" && !pending[j].cancelled) {
@@ -334,6 +375,11 @@ function applyRobustnessSignals(signals, bag) {
     if (pending[k].cancelled) continue
     total += pending[k].pen
     bump(bag, pending[k].kind, pending[k].pen)
+  }
+  if (derived) {
+    var each = Number(HEALTH.signals.robustness.tool_failure || 0)
+    for (var d = 0; d < derived; d++) bump(bag, "tool_failure", each)
+    total += derived * each
   }
   return total
 }
@@ -403,7 +449,7 @@ function computeHealth(requests, window) {
       if (outage && !hasRecovery && !hasFallback) {
         q += HEALTH.robustness.providerOutageUnrecovered; bump(robBag, "providerOutageUnrecovered", HEALTH.robustness.providerOutageUnrecovered)
       }
-      q += applyRobustnessSignals(signals, robBag)
+      q += applyRobustnessSignals(signals, robBag, toolFacts(r))
       robPenalty += Math.min(q, HEALTH.robustness.cap)
     }
 
