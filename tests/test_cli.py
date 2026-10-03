@@ -6,6 +6,7 @@ throwaway directory and never touches real telemetry. Run: python3 tests/test_cl
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -169,6 +170,69 @@ def main() -> int:
                                  "--id", "R3", "--dry-run", "--apply"], env=env,
                                 capture_output=True, text=True)
         ok("contradictory flags are refused, not guessed", contra.returncode == 1, contra.returncode)
+
+        # --- instrument: what the runtime loaded vs what is on disk (0.7.4) -----
+        # The test file is the instrument, so its version is ours to change: that is
+        # what makes "the process loaded X, the disk has Y" observable instead of a
+        # claim. A live agent keeps the code it loaded until it reloads.
+        ext = Path(tmp) / "instrument.ts"
+        ext.write_text('const EXT_ID = "agent-pipeline";\nconst EXT_VERSION = "9.9.9";\n', encoding="utf-8")
+        env_ext = dict(env, PI_AGENT_PIPELINE_EXTENSION=str(ext))
+
+        def run_ext(*args: str):
+            return subprocess.run([sys.executable, str(CLI), *args], env=env_ext,
+                                  capture_output=True, text=True)
+
+        def store() -> dict:
+            return json.loads((Path(tmp) / "omarchy" / "agent-pipeline" / "requests.json").read_text())
+
+        run_ext("patch", json.dumps({"id": "R9", "instrument": {
+            "id": "agent-pipeline", "extVersion": "9.9.9",
+            "loadedAt": "2026-10-03T03:00:00Z", "pid": 4242}}))
+        ins = store().get("instrument") or {}
+        ok("the version the runtime loaded is recorded",
+           ins.get("extVersion") == "9.9.9" and ins.get("loadedAt") == "2026-10-03T03:00:00Z",
+           json.dumps(ins, ensure_ascii=False)[:200])
+        ok("the disk side is recorded next to it",
+           (ins.get("disk") or {}).get("version") == "9.9.9", ins.get("disk"))
+        ok("the disk side is a hash of the real file",
+           (ins.get("disk") or {}).get("sha256") == hashlib.sha256(ext.read_bytes()).hexdigest(),
+           (ins.get("disk") or {}).get("sha256"))
+        ok("the disk side names the path, the mtime and when it was checked",
+           all((ins.get("disk") or {}).get(k) for k in ("path", "mtime", "checkedAt")), ins.get("disk"))
+        ok("the runtime's report is stamped as seen", bool(ins.get("seenAt")), ins.get("seenAt"))
+
+        # One choke point: any write refreshes the disk side, not just `patch`.
+        ext.write_text('const EXT_ID = "agent-pipeline";\nconst EXT_VERSION = "10.0.0";\n', encoding="utf-8")
+        run_ext("signal", "--id", "R9", "--dimension", "stability", "--kind", "retry",
+                "--level", "warn", "--detail", "502")
+        ins = store()["instrument"]
+        ok("a later write refreshes the disk side", (ins.get("disk") or {}).get("version") == "10.0.0",
+           (ins.get("disk") or {}).get("version"))
+        ok("the disk side never overwrites what the process loaded", ins.get("extVersion") == "9.9.9",
+           ins.get("extVersion"))
+        ok("so the mismatch the panel warns about is observable",
+           bool(ins.get("extVersion")) and ins.get("extVersion") != (ins.get("disk") or {}).get("version"),
+           ins)
+
+        # Nothing to read: record nothing. An absent instrument is an honest answer;
+        # a fabricated version would make the panel claim the scores are current.
+        env_gone = dict(env, PI_AGENT_PIPELINE_EXTENSION=str(Path(tmp) / "does-not-exist.ts"))
+        subprocess.run([sys.executable, str(CLI), "signal", "--id", "R9", "--dimension", "stability",
+                        "--kind", "retry", "--level", "warn", "--detail", "503"],
+                       env=env_gone, capture_output=True, text=True)
+        ok("a missing extension file records no disk version",
+           (store()["instrument"].get("disk")) is None, store()["instrument"].get("disk"))
+
+        bare = Path(tmp) / "no-version.ts"
+        bare.write_text("// a file with no EXT_VERSION constant\n", encoding="utf-8")
+        env_bare = dict(env, PI_AGENT_PIPELINE_EXTENSION=str(bare))
+        subprocess.run([sys.executable, str(CLI), "signal", "--id", "R9", "--dimension", "stability",
+                        "--kind", "retry", "--level", "warn", "--detail", "504"],
+                       env=env_bare, capture_output=True, text=True)
+        ins = store()["instrument"]
+        ok("a versionless file yields an empty version, not an invented one",
+           (ins.get("disk") or {}).get("version") == "" and ins.get("extVersion") == "9.9.9", ins.get("disk"))
 
     print(f"\n{passed} passed, {failed} failed")
     return 1 if failed else 0

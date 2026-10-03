@@ -30,8 +30,10 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import fcntl
+import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -97,10 +99,50 @@ def load() -> dict:
 def save(data: dict) -> None:
     data["updatedAt"] = now()
     data["requests"] = data["requests"][-MAX_REQUESTS:]
+    refresh_instrument(data)
     STORE.parent.mkdir(parents=True, exist_ok=True)
     tmp = STORE.with_suffix(".tmp")
     tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, STORE)
+
+
+# --- instrument self-report --------------------------------------------------
+# The runtime publishes which extension code it LOADED (id, version, time, pid);
+# this writer records what is on disk NOW next to it. A live process keeps the code
+# it loaded until pi reloads or restarts, so "the file is fixed" and "the running
+# agent uses the fix" are two different claims - measured 2026-10-03, when a process
+# holding the old extension reported tool failures with no recovery for 40 minutes
+# after the fix landed. Without this pair the panel shows scores from an instrument
+# nobody can name, and the number looks like a property of the agent.
+EXTENSION_PATH = Path(os.environ.get("PI_AGENT_PIPELINE_EXTENSION")
+                      or (Path.home() / ".pi" / "agent" / "extensions" / "agent-pipeline.ts"))
+VERSION_RE = re.compile(r'EXT_VERSION\s*=\s*"([^"]+)"')
+
+
+def disk_instrument() -> dict | None:
+    """What the extension file on disk says about itself right now."""
+    try:
+        raw = EXTENSION_PATH.read_bytes()
+        mtime = EXTENSION_PATH.stat().st_mtime
+    except OSError:
+        return None
+    match = VERSION_RE.search(raw.decode("utf-8", "replace"))
+    return {"version": match.group(1) if match else "",
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "mtime": dt.datetime.fromtimestamp(mtime, dt.timezone.utc).isoformat().replace("+00:00", "Z"),
+            "path": str(EXTENSION_PATH),
+            "checkedAt": now()}
+
+
+def refresh_instrument(data: dict) -> None:
+    """Refresh the disk side next to whatever the runtime reported loading."""
+    disk = disk_instrument()
+    ins = data.get("instrument")
+    if not isinstance(ins, dict):
+        if disk is None:
+            return
+        ins = data["instrument"] = {}
+    ins["disk"] = disk
 
 
 def with_lock(fn):
@@ -435,6 +477,13 @@ def main() -> int:
             except json.JSONDecodeError:
                 return 1
             data = load()
+            if isinstance(patch.get("instrument"), dict):
+                loaded = {k: v for k, v in patch["instrument"].items() if k != "disk"}
+                current = data.get("instrument")
+                if not isinstance(current, dict):
+                    current = data["instrument"] = {}
+                current.update(loaded)
+                current["seenAt"] = now()
             rid = str(patch.get("id") or "")
             if not rid:
                 return 1

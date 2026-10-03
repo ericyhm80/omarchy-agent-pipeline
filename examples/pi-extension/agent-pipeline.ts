@@ -18,6 +18,23 @@ export default function (pi) {
   })();
   if (selfInstrumented) return;
 
+  // Which instrument is loaded, recorded on every run.
+  //
+  // A live process keeps the code it loaded until pi reloads or restarts it, so
+  // "the file is fixed" and "the running agent uses the fix" are different claims.
+  // Measured 2026-10-03: after the extension on disk was fixed at 16:38Z, a run at
+  // 18:41Z still reported tool failures with no recovery - because that process had
+  // loaded the old code. The number was honest about the instrument, not the agent,
+  // and nothing in the UI said so. So the runtime now publishes what it LOADED
+  // (id, version, time, pid); the writer records what is on disk NOW next to it,
+  // and the panel says whether the scores can be trusted yet.
+  const EXT_ID = "agent-pipeline";
+  const EXT_VERSION = "0.7.4";
+  const LOADED_AT = new Date().toISOString();
+  function procPid() {
+    try { return Number(process.pid) || 0; } catch { return 0; }
+  }
+
   // Conservative, label-only command scan. A match never blocks anything — it is
   // one security data point the runtime reports about itself.
   const RISK_PATTERNS = [
@@ -86,6 +103,7 @@ export default function (pi) {
       state: "running",
       model: modelId,
       env: { provider, model: modelId },
+      instrument: { id: EXT_ID, extVersion: EXT_VERSION, loadedAt: LOADED_AT, pid: procPid() },
       nodes: [
         { id: "input", status: "ok", detail: prompt.length + " chars", ms: 0 },
         { id: "router", status: "skipped", detail: "cli: no router stage", ms: 0 },

@@ -75,6 +75,14 @@ BarWidget {
     if (win.length) lines.push(win.join(" · "))
     if (worstDim && worstDim.level !== "good") lines.push("weak: " + worstDim.letter + " " + worstDim.score)
 
+    // A number is only as good as the instrument that produced it: say so here too,
+    // so a glance at the bar is enough to know the scores came from older code.
+    var inst = Model.instrumentStatus(snapshot)
+    if (inst.state === "stale" || inst.state === "unregistered")
+      lines.push("instrument mismatch: loaded "
+        + (inst.loaded ? String(inst.loaded.extVersion || "?") : "unregistered")
+        + " / disk " + (inst.disk ? String(inst.disk.version || "?") : "?"))
+
     if (!latest) return "Agent pipeline — " + lines.join("  |  ") + " (no requests yet)"
     var parts = [String(latest.state || "").toUpperCase()]
     if (latest.title) parts.push(String(latest.title))

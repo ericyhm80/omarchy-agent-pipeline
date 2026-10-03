@@ -27,7 +27,47 @@ function parse(text) {
     return { updatedAt: "", requests: [], invalid: true }
   var rows = data.requests.slice()
   rows.sort(function(a, b) { return String(b.at || "") > String(a.at || "") ? 1 : -1 })
-  return { updatedAt: String(data.updatedAt || ""), requests: rows, invalid: false }
+  return { updatedAt: String(data.updatedAt || ""), requests: rows, invalid: false,
+           instrument: (data.instrument && typeof data.instrument === "object") ? data.instrument : null }
+}
+
+// Which instrument produced these numbers, and is it still the one on disk?
+//
+// A live agent process keeps the extension code it loaded until it is reloaded or
+// restarted, so "the file is fixed" and "the running agent uses the fix" are two
+// different claims. Measured 2026-10-03: a process holding the old extension kept
+// reporting absorbed failures as penalties for 40 minutes after the fix landed,
+// and the panel showed that as a property of the agent. The runtime now reports
+// what it LOADED; the writer records what is on disk; this compares them.
+function isoTimestamp(value) {
+  var d = new Date(String(value || ""))
+  if (isNaN(d.getTime())) return String(value || "?")
+  function p(n) { return (n < 10 ? "0" : "") + n }
+  return p(d.getMonth() + 1) + "-" + p(d.getDate()) + " " + p(d.getHours()) + ":" + p(d.getMinutes())
+}
+
+function instrumentStatus(snapshot) {
+  var ins = (snapshot && snapshot.instrument && typeof snapshot.instrument === "object") ? snapshot.instrument : null
+  var disk = (ins && ins.disk && typeof ins.disk === "object") ? ins.disk : null
+  var loaded = ins ? String(ins.extVersion || "") : ""
+  var onDisk = disk ? String(disk.version || "") : ""
+  if (!loaded) {
+    return { state: "unregistered", loaded: ins, disk: disk,
+             label: onDisk
+               ? "instrument not registered: disk has " + onDisk + ", but the running process never reported a version - it is probably still an older extension; reload the agent"
+               : "instrument not registered, and no extension version could be read from disk" }
+  }
+  if (!onDisk) {
+    return { state: "unknown", loaded: ins, disk: disk,
+             label: "instrument " + loaded + " (loaded " + isoTimestamp(ins.loadedAt) + ") - disk version unreadable" }
+  }
+  if (loaded === onDisk) {
+    return { state: "current", loaded: ins, disk: disk,
+             label: "instrument " + loaded + " - disk agrees (loaded " + isoTimestamp(ins.loadedAt) + ")" }
+  }
+  return { state: "stale", loaded: ins, disk: disk,
+           label: "instrument is stale: the process loaded " + loaded + " but disk has " + onDisk
+             + " - these scores come from older code; reload the agent before trusting them" }
 }
 
 // Shipped default graph, mirroring the writer's default so the widget renders

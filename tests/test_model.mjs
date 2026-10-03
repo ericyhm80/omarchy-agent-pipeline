@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const modelPath = path.join(here, "..", "Model.js");
 let src = fs.readFileSync(modelPath, "utf8").replace(/^\.pragma library[^\n]*\n/, "");
-src += "\nexport { parse, computeHealth, healthRows, healthColorKey, fmtScore, runtimeFacts, cacheHitPct, tokensPerSec, HEALTH, windowStats, headlineFacts, windowLines, scoreSeries, sparkBars, ageLabel, isSettled, isWaiting };\n";
+src += "\nexport { parse, computeHealth, healthRows, healthColorKey, fmtScore, runtimeFacts, cacheHitPct, tokensPerSec, HEALTH, windowStats, headlineFacts, windowLines, scoreSeries, sparkBars, ageLabel, isSettled, isWaiting, instrumentStatus };\n";
 const tmp = path.join(os.tmpdir(), `agent-pipeline-model-${process.pid}.mjs`);
 fs.writeFileSync(tmp, src);
 const Model = await import(`file://${tmp}?t=${Date.now()}`);
@@ -203,6 +203,50 @@ const bars2 = Model.sparkBars([100, null, 60]);
 ok("spark bars shape", bars2.length === 3 && bars2[0].frac === 1 && bars2[1].level === "unknown" && bars2[2].level === "alert", JSON.stringify(bars2));
 ok("age label minutes", Model.ageLabel(120000) === "2m ago", Model.ageLabel(120000));
 ok("healthRows carry bars", Model.healthRows(Model.computeHealth([req({})]), ser)[0].bars.length === 2);
+
+// --- instrument: which extension produced these numbers (0.7.4) ----------------
+// A live process keeps the extension code it loaded, so the panel must be able to
+// say whether the scores describe the code on disk or an older one. Measured
+// 2026-10-03: absorbed failures were scored as penalties for 40 minutes after the
+// fix landed, because the running process had loaded the old extension.
+const disk = (v, extra) => Object.assign({ version: v, sha256: "a".repeat(64), checkedAt: "2026-10-03T04:00:00Z" }, extra);
+const snap = (ins) => Model.parse(JSON.stringify({ updatedAt: "x", requests: [], instrument: ins }));
+
+let st = Model.instrumentStatus(snap({ id: "agent-pipeline", extVersion: "0.7.4", loadedAt: "2026-10-03T03:41:32Z", pid: 1, disk: disk("0.7.4") }));
+ok("same version on disk and in the process is current", st.state === "current", st.state);
+ok("current label names the version", /0\.7\.4/.test(st.label), st.label);
+
+st = Model.instrumentStatus(snap({ extVersion: "0.7.2", loadedAt: "2026-10-03T03:41:32Z", disk: disk("0.7.4") }));
+ok("process older than disk is stale", st.state === "stale", st.state);
+ok("stale label names both versions and says reload", /0\.7\.2/.test(st.label) && /0\.7\.4/.test(st.label) && /reload/i.test(st.label), st.label);
+
+// an older extension reports no version at all - the honest reading of "unknown instrument"
+st = Model.instrumentStatus(snap({ disk: disk("0.7.4") }));
+ok("no reported version is unregistered, not current", st.state === "unregistered", st.state);
+ok("unregistered label names the disk version", /0\.7\.4/.test(st.label), st.label);
+ok("unregistered is not treated as agreeing", st.state !== "current", st.state);
+
+st = Model.instrumentStatus(Model.parse(JSON.stringify({ updatedAt: "x", requests: [] })));
+ok("no instrument block at all is unregistered", st.state === "unregistered", st.state);
+ok("missing block mentions no version rather than inventing one", !/0\.\d/.test(st.label), st.label);
+
+st = Model.instrumentStatus(snap({ extVersion: "0.7.4", disk: { version: "", sha256: "x" } }));
+ok("registered but unreadable disk is unknown", st.state === "unknown", st.state);
+st = Model.instrumentStatus(snap({ extVersion: "0.7.4" }));
+ok("registered with no disk block is unknown", st.state === "unknown", st.state);
+
+// the indicator must never move a score: it is a caveat about the instrument
+const staleOne = Model.parse(JSON.stringify({ updatedAt: "x", requests: [req({})],
+  instrument: { extVersion: "0.7.2", disk: disk("0.7.4") } }));
+ok("a stale instrument changes no score", Model.computeHealth(staleOne.requests).stability.score === 100,
+  Model.computeHealth(staleOne.requests).stability.score);
+ok("parse carries the instrument block", staleOne.instrument && staleOne.instrument.disk.version === "0.7.4");
+ok("every state has a label", ["current", "stale", "unknown", "unregistered"].every((s) => {
+  const m = { current: { extVersion: "7", disk: disk("7") }, stale: { extVersion: "7", disk: disk("8") },
+              unknown: { extVersion: "7" }, unregistered: { disk: disk("8") } }[s];
+  const r = Model.instrumentStatus(snap(m));
+  return r.state === s && typeof r.label === "string" && r.label.length > 0;
+}));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

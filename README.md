@@ -75,6 +75,46 @@ what it cannot see (a human gate that was skipped, a sandbox violation, a stealt
 exception). A signal's default penalty comes from its `kind`; pass `--weight N` to
 override it for one signal.
 
+### Which instrument produced these numbers?
+
+The panel always names the instrument, because a score is a statement about the
+agent **as the runtime running it understood it** — and a live agent process keeps
+the extension code it loaded until it is reloaded or restarted. "The file is
+fixed" and "the running agent uses the fix" are two different claims.
+
+Measured 2026-10-03: after the extension on disk was fixed, a process that had
+loaded the old code kept reporting absorbed failures as penalties for 40 minutes.
+The number was honest about the instrument, and nothing on screen said so — it
+read like a property of the agent.
+
+The extension publishes what it **loaded**, and the writer records what is on
+disk next to it:
+
+```json
+"instrument": {
+  "id": "agent-pipeline",
+  "extVersion": "0.7.4",
+  "loadedAt": "2026-10-03T03:41:32.000Z",
+  "pid": 3183597,
+  "disk": { "version": "0.7.4", "sha256": "1068ed9b…",
+            "mtime": "2026-10-03T03:41:32Z", "checkedAt": "2026-10-03T04:08:51Z" }
+}
+```
+
+`loaded === disk` → quiet line (`instrument 0.7.4 - disk agrees (loaded 10-03 03:41)`).
+Different versions → bold warning, and the bar tooltip repeats it:
+
+```
+instrument is stale: the process loaded 0.7.2 but disk has 0.7.4
+- these scores come from older code; reload the agent before trusting them
+```
+
+No version reported at all → `instrument not registered`, which is what an older
+extension looks like, and is the honest reading of "these numbers came from a
+version nobody can name". A missing extension file records nothing rather than a
+fabricated version. The indicator never changes a score — a stale instrument is a
+caveat about what the numbers describe, not a reason to adjust them.
+
 ### A failure that was absorbed is not a degradation
 
 How does the widget know a failure was absorbed? It reads the recorded **facts**:
@@ -153,6 +193,8 @@ $XDG_STATE_HOME/omarchy/agent-pipeline/requests.json      # usually ~/.local/sta
 ```json
 {
   "updatedAt": "2026-10-01T15:17:00Z",
+  "instrument": { "id": "agent-pipeline", "extVersion": "0.7.4",
+                  "loadedAt": "...", "disk": { "version": "0.7.4", "sha256": "..." } },
   "architecture": {
     "width": 720, "height": 380,
     "nodes": [

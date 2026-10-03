@@ -32,6 +32,10 @@ Panel {
 
   property var snapshot: Model.parse("")
   readonly property var requests: snapshot.requests
+  // Which instrument produced these numbers, and is it still the one on disk?
+  // Shown at all times, quiet when they agree: an indicator that only appears when
+  // healthy is one nobody can check on demand.
+  readonly property var instrument: Model.instrumentStatus(snapshot)
 
   // Which run the graph is showing. 0 = newest (the live one); the arrow keys or
   // a click on a row in RECENT inspect an earlier run without losing the live view.
@@ -376,6 +380,21 @@ Panel {
             font.bold: true
             wrapMode: Text.WordWrap
           }
+        }
+
+        // Which instrument produced these numbers. Quiet when the process is
+        // running what is on disk; loud when it is not, because then every score
+        // above describes a version of the agent that no longer exists.
+        Text {
+          width: parent.width
+          text: root.instrument.label
+          color: root.instrument.state === "current" || root.instrument.state === "unknown"
+            ? root.dim
+            : root.urgent
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          font.bold: root.instrument.state === "stale" || root.instrument.state === "unregistered"
+          wrapMode: Text.WordWrap
         }
 
         // A dimension with no evidence is shown as unknown, and says so.
