@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "id": "io.github.ericyhm80.agent-pipeline",
   "name": "Agent Pipeline",
-  "version": "0.7.8",
+  "version": "0.8.0",
   "author": "haomin.ye (ericyhm80)",
   "license": "MIT",
   "repository": "https://github.com/ericyhm80/omarchy-agent-pipeline",
-  "description": "Watch what an AI agent actually does: a live graph of its pipeline — nodes, information flow, per-node state, tokens, duration and problems, plus stability / robustness / security scores and every runtime metric, with click-through history.",
+  "description": "See what your AI agent actually does: live request paths, reported model/tool activity, timing, cost, health and history. Opt in to Pi or Codex reporters, or manually report checkpoints from Claude Code, OpenClaw, Hermes, GrokBot and other agents via CLI.",
   "kinds": [
     "bar-widget"
   ],
@@ -15,7 +15,7 @@
   },
   "barWidget": {
     "displayName": "Agent Pipeline",
-    "description": "Per-request agent workflow graph: classification, routing, context, retrieval, model, tools, verification, human gate — with tokens, duration and issues",
+    "description": "Live, opt-in agent workflow graph with model/tool activity, reported metrics, health scores and run history",
     "category": "AI",
     "allowMultiple": false,
     "defaultSection": "center"

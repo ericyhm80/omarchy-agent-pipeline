@@ -42,17 +42,19 @@ unchanged bundled extension and a CLI link created by this setup flow. If an old
 or customized extension already occupies the target path, setup refuses to replace
 it; back it up and remove it yourself only if you intend to replace it.
 
-## Manual reporting for Claude Code, Hermes, and OpenClaw
+## Manual reporting for other agents
 
-These runtimes do not yet have bundled automatic adapters. The panel provides a
-manual start/checkpoint/end recipe. It records only the milestones you choose; it
-does not watch the agent or infer what happened. Run these commands from one shell
-and keep it open while the task is in progress:
+Claude Code, OpenClaw, Hermes, GrokBot, and any runtime whose operator can run
+this CLI can report chosen checkpoints. These agents do **not** have bundled
+automatic adapters: nothing connects until the customer explicitly runs the
+commands. The panel records only the milestones you choose; it does not watch
+the agent or infer what happened. Run these commands from one shell and keep it
+open while the task is in progress:
 
 ```bash
 PIPE="$HOME/.config/omarchy/plugins/io.github.ericyhm80.agent-pipeline/bin/agent-pipeline"
 REQ="manual-$(date +%s%N)-$$"
-AGENT=claude-code  # choose claude-code, hermes, or openclaw
+AGENT=claude-code  # or openclaw, hermes, grokbot, or your own agent ID
 
 # Before the agent task:
 "$PIPE" start --id "$REQ" --title "Manual agent turn" --agent "$AGENT"

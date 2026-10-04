@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const modelPath = path.join(here, "..", "Model.js");
 let src = fs.readFileSync(modelPath, "utf8").replace(/^\.pragma library[^\n]*\n/, "");
-src += "\nexport { parse, computeHealth, healthRows, healthColorKey, fmtScore, fmtCost, runtimeFacts, cacheHitPct, tokensPerSec, HEALTH, windowStats, headlineFacts, windowLines, scoreSeries, sparkBars, ageLabel, isSettled, isWaiting, instrumentStatus, jevStats, architectureFor, edgeTraversed };\n";
+src += "\nexport { parse, computeHealth, healthRows, healthColorKey, fmtScore, fmtCost, runtimeFacts, cacheHitPct, tokensPerSec, HEALTH, windowStats, headlineFacts, windowLines, scoreSeries, sparkBars, ageLabel, isSettled, isWaiting, instrumentStatus, jevStats, architectureFor, edgeTraversed, diagnosticSummary, nodeAtCanvasPoint, inspectNode, contentBounds };\n";
 const tmp = path.join(os.tmpdir(), `agent-pipeline-model-${process.pid}.mjs`);
 fs.writeFileSync(tmp, src);
 const Model = await import(`file://${tmp}?t=${Date.now()}`);
@@ -23,6 +23,33 @@ function ok(name, cond, extra) {
   else { fail++; console.log("  \u2717", name, extra === undefined ? "" : extra); }
 }
 const req = (o) => Object.assign({ id: "r", at: "2026-10-02T00:00:00Z", state: "done", durationMs: 1000 }, o);
+
+const diagnosed = (r) => Model.diagnosticSummary({}, r);
+ok("no run is unknown, not healthy", diagnosed(null).level === "unknown");
+ok("template-only stage is not treated as execution", diagnosed(req({})).headline === "No stage events reported for this run");
+ok("a self-reported manual agent has explicit coverage limits", diagnosed(req({ agent: "grokbot", nodes: [{ id: "tools", status: "ok" }] })).limit.includes("only submitted checkpoints"));
+ok("reported stage failure is not a guessed cause", diagnosed(req({ nodes: [{ id: "model", status: "error" }] })).level === "alert" && diagnosed(req({ nodes: [{ id: "model", status: "error" }] })).next.includes("confirm"));
+ok("recovered same-tool failure is not unresolved", diagnosed(req({ nodes: [{ id: "tools", status: "ok" }], toolLog: [{ tool: "bash", ok: false }, { tool: "bash", ok: true }] })).headline.includes("absorbed"));
+ok("unrecovered tool facts take priority", diagnosed(req({ nodes: [{ id: "tools", status: "ok" }], toolLog: [{ tool: "bash", ok: false }] })).headline.includes("1 unresolved tool failure"));
+ok("a visible clean run is only clean within visible stages", diagnosed(req({ nodes: [{ id: "model", status: "ok" }] })).headline === "No fault reported in visible stages");
+ok("an active run cannot be pronounced settled", diagnosed(req({ state: "running", nodes: [{ id: "model", status: "ok" }] })).headline.includes("yet"));
+ok("reported security risk cannot show a clean finding", diagnosed(req({ nodes: [{ id: "model", status: "ok" }], signals: [{ dimension: "security", kind: "human_gate_bypass", level: "error" }] })).level === "alert");
+ok("non-risk security evidence does not become a diagnosis", diagnosed(req({ nodes: [{ id: "model", status: "ok" }], signals: [{ dimension: "security", kind: "no_risk_detected", level: "info" }] })).level === "normal");
+
+const graphForClick = { nodes: [{ id: "verify", label: "Verify", x: 120, y: 20, w: 80, h: 40 }], edges: [] };
+const clickBounds = Model.contentBounds(graphForClick);
+const scale = 400 / clickBounds.w;
+ok("node hit testing inverts the canvas scale and translation",
+   Model.nodeAtCanvasPoint(graphForClick, clickBounds, 400, (150 - clickBounds.x) * scale, (40 - clickBounds.y) * scale) === "verify");
+ok("clicks outside a node never select one", Model.nodeAtCanvasPoint(graphForClick, clickBounds, 400, 0, 0) === null);
+const absentNode = Model.inspectNode(graphForClick, req({}), "verify");
+ok("inspecting an unreported stage does not say it was skipped", !absentNode.reported && absentNode.next.includes("not proof"));
+const privateNode = Model.inspectNode(graphForClick, req({ nodes: [{ id: "verify", status: "ok", ms: 25, detail: "SECRET_PROMPT" }] }), "verify");
+ok("node inspector never repeats reporter detail or prompt", privateNode.reported && privateNode.timing === "25ms" && !JSON.stringify(privateNode).includes("SECRET_PROMPT"));
+const untrustedGraph = { nodes: [{ id: "custom", label: "SECRET_PROMPT", x: 0, y: 0, w: 80, h: 40 }] };
+const untrustedInspect = Model.inspectNode(untrustedGraph, req({ nodes: [{ id: "custom", status: "SECRET_PROMPT", detail: "SECRET_PROMPT" }] }), "custom");
+ok("inspector does not echo arbitrary architecture labels or unknown statuses", !JSON.stringify(untrustedInspect).includes("SECRET_PROMPT"));
+ok("unknown node has no invented evidence", Model.inspectNode(graphForClick, req({}), "nonexistent") === null);
 
 const jevPayload = Model.parse(JSON.stringify({ requests: [], jevEvents: [
   { source: "token-router", status: "success", inputTokens: 566, outputTokens: 111,

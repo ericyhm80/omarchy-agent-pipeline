@@ -202,6 +202,50 @@ function edgeTraversed(request, from, to) {
   return false
 }
 
+// Same transform as the Canvas: translate(-bounds.x*k, -bounds.y*k), scale(k).
+function nodeAtCanvasPoint(arch, bounds, canvasWidth, x, y) {
+  if (!bounds || !(bounds.w > 0) || !(canvasWidth > 0)) return null
+  var k = canvasWidth / bounds.w
+  var px = x / k + bounds.x, py = y / k + bounds.y
+  var nodes = (arch && arch.nodes) || []
+  for (var i = nodes.length - 1; i >= 0; i--) {
+    var n = nodes[i]
+    if (px >= n.x && px <= n.x + n.w && py >= n.y && py <= n.y + n.h) return String(n.id)
+  }
+  return null
+}
+
+// Only expose bounded status and timing already reported in the shared store;
+// never copy node detail, command arguments, prompt text, or tool output here.
+function inspectNode(arch, request, id) {
+  var n = id ? nodeById(arch, id) : null
+  if (!n) return null
+  var row = nodeState(request, id)
+  var reported = !!row && !!String(row.status || "")
+  var edges = (request && request.edges) || []
+  var adjacent = 0
+  for (var i = 0; i < edges.length; i++)
+    if (String(edges[i].from) === String(id) || String(edges[i].to) === String(id)) adjacent++
+  var rawStatus = reported ? String(row.status).toLowerCase() : ""
+  var safeStatuses = ["ok", "done", "success", "warn", "error", "failed", "running", "skipped", "wait"]
+  var status = !reported ? "no event reported"
+    : safeStatuses.indexOf(rawStatus) !== -1 ? rawStatus : "reported (unrecognized status)"
+  var timing = reported && Number(row.ms) > 0 ? fmtMs(row.ms) : "not reported"
+  var next = !reported ? "If this stage matters, add an explicit event; absence is not proof it was skipped."
+    : status === "error" || status === "failed" ? "Check this stage in the agent runtime; status alone does not establish cause."
+    : status === "warn" ? "Verify the warning in the agent runtime and whether it recovered."
+    : status === "skipped" ? "Reporter marked this stage skipped; confirm why with the runtime."
+    : status === "running" ? "Wait for the stage to finish before judging its outcome."
+    : "Compare with adjacent reported stages if a problem remains."
+  // Custom architecture labels may contain arbitrary text. Show only a short,
+  // slug-shaped stage ID here; the inspector never copies the label or detail.
+  var nodeId = String(n.id || "")
+  var safeId = /^[a-z][a-z0-9_-]{0,40}$/.test(nodeId) ? nodeId : "custom stage"
+  return { label: safeId, status: status, timing: timing, adjacent: adjacent,
+    reported: reported, next: next,
+    limit: "Reporter-submitted metadata only; no independent proof of internal reasoning or tool output." }
+}
+
 function durationMs(request) {
   if (!request) return 0
   if (request.durationMs) return Number(request.durationMs)
@@ -222,6 +266,65 @@ function problemCount(request) {
   for (var i = 0; i < rows.length; i++)
     if (String(rows[i].level || "") !== "info") n++
   return n
+}
+
+// A bounded diagnostic summary, not a causal explanation. Diagram nodes may be
+// a shipped template; a missing event is never proof a stage was skipped.
+function diagnosticSummary(snapshot, request) {
+  var arch = architectureFor(snapshot, request)
+  var origin = request && request.architecture && request.architecture.nodes && request.architecture.nodes.length
+    ? "run graph" : snapshot && snapshot.architecture && snapshot.architecture.nodes && snapshot.architecture.nodes.length
+      ? "store graph" : "shipped template"
+  var nodes = (request && request.nodes) || []
+  var edges = (request && request.edges) || []
+  var seen = 0, failed = 0
+  for (var i = 0; i < nodes.length; i++) {
+    var n = nodes[i] || {}
+    if (!nodeById(arch, n.id) || !String(n.status || "")) continue
+    seen++
+    if (n.status === "error" || n.status === "failed") failed++
+  }
+  var evidence = seen + " reported stage events · " + edges.length + " reported path edges · " + origin
+  var agent = String(request && request.agent || "").toLowerCase()
+  var manual = agent === "claude-code" || agent === "openclaw" || agent === "hermes" || agent === "grokbot"
+  var limit = manual
+    ? "Agent label is self-reported. No bundled auto-adapter for this runtime; only submitted checkpoints are visible."
+    : "Unreported stages and internal reasoning are invisible; the agent label is self-reported."
+  if (!request) return { level: "unknown", headline: "No run reported yet", evidence: evidence,
+    limit: limit, next: "Opt in to a reporter, or submit a manual start/checkpoint/end sequence." }
+
+  var facts = toolFacts(request)
+  var failures = 0
+  if (facts) for (var j = 0; j < facts.length; j++) if (facts[j] && facts[j].ok === false) failures++
+  var unresolved = facts ? uncancelledToolFailures(facts) : 0
+  var issueCount = problemCount(request)
+  var securityFlags = 0
+  var signals = Array.isArray(request.signals) ? request.signals : []
+  for (var s = 0; s < signals.length; s++)
+    if (signals[s] && signals[s].dimension === "security" && signalPenalty("security", signals[s]) > 0)
+      securityFlags++
+  if (securityFlags)
+    return { level: "alert", headline: securityFlags + " reported security risk signal(s)",
+      evidence: evidence + " · " + securityFlags + " reported risk signal(s)", limit: limit,
+      next: "Review the reported risk signal and verify the actual security impact." }
+  if (String(request.state) === "error")
+    return { level: "alert", headline: "Run reported an error", evidence: evidence,
+      limit: limit, next: "Inspect the reported failure stage and verify it in the agent runtime." }
+  if (failed || unresolved)
+    return { level: "alert", headline: failed + " failed stage(s) · " + unresolved + " unresolved tool failure(s)",
+      evidence: evidence, limit: limit, next: "Inspect the failed stage or tool status; confirm the cause outside the panel." }
+  if (issueCount)
+    return { level: "watch", headline: issueCount + " reported issue(s)", evidence: evidence,
+      limit: limit, next: "Review the reported issues and check whether the run recovered." }
+  if (failures)
+    return { level: "watch", headline: failures + " tool failure(s) later absorbed by same-tool success",
+      evidence: evidence, limit: limit, next: "Check the retry path if these recoveries are unexpected." }
+  if (!seen)
+    return { level: "unknown", headline: "No stage events reported for this run", evidence: evidence,
+      limit: limit, next: "Confirm the reporter sends stage events; do not infer that stages were skipped." }
+  return { level: "normal", headline: String(request.state) === "running"
+      ? "No fault reported yet in visible stages" : "No fault reported in visible stages",
+    evidence: evidence, limit: limit, next: "If a stage matters but is absent, instrument it explicitly." }
 }
 
 function stateColorKey(state) {

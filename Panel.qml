@@ -4,6 +4,7 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
+import "." as Local
 
 // The pipeline panel, v0.2: the agent's architecture as a live graph.
 // Nodes are the stages of the pipeline, edges are how information travels, and
@@ -32,6 +33,11 @@ Panel {
   readonly property string pluginDir: (Quickshell.env("HOME") || "")
     + "/.config/omarchy/plugins/io.github.ericyhm80.agent-pipeline"
   property bool connectionSettingsOpen: false
+  property bool recentExpanded: false
+  property bool metricsExpanded: false
+  // 0 = clear, 1 = glass, 2 = solid. The default shows the desktop through the card.
+  property int surfaceMode: 0
+  readonly property real surfaceAlpha: surfaceMode === 0 ? 0.0 : (surfaceMode === 1 ? 0.5 : 1.0)
   property bool setupBusy: false
   property bool setupFailed: false
   property string setupAction: ""
@@ -54,6 +60,8 @@ Panel {
   // Which run the graph is showing. 0 = newest (the live one); the arrow keys or
   // a click on a row in RECENT inspect an earlier run without losing the live view.
   property int selectedIndex: 0
+  property string selectedNodeId: ""
+  onSelectedIndexChanged: selectedNodeId = ""
   readonly property int shownIndex: requests.length === 0 ? 0 : Math.min(selectedIndex, requests.length - 1)
   readonly property var active: requests.length > 0 ? requests[shownIndex] : null
   readonly property bool viewingNewest: shownIndex === 0
@@ -82,6 +90,8 @@ Panel {
   readonly property bool animating: !!active && String(active.state) === "running"
   readonly property var activeIssues: Model.issues(active)
   readonly property int problems: Model.problemCount(active)
+  readonly property var diagnosis: Model.diagnosticSummary(snapshot, active)
+  readonly property var nodeInsight: Model.inspectNode(arch, active, selectedNodeId)
 
   // Architecture health: stability / robustness / security over the recent
   // window, plus every runtime fact the selected run recorded.
@@ -202,6 +212,14 @@ Panel {
     else root.open()
   }
 
+  // Explicit local deep-link to a stage; never reads more than the panel store.
+  function inspect(stage) {
+    if (!Model.nodeById(root.arch, stage)) return
+    root.open()
+    root.selectedNodeId = String(stage)
+    graph.requestPaint()
+  }
+
   function switchPanel(direction) {
     if (root.bar && typeof root.bar.switchPanelFrom === "function")
       return root.bar.switchPanelFrom(root.barIdentity, direction)
@@ -273,8 +291,10 @@ Panel {
     }
   }
 
-  KeyboardPanel {
+  Local.AgentPipelineKeyboardPanel {
     id: panel
+    // Only the card fill changes; text, borders, and status remain crisp.
+    cardBackground: root.withAlpha(Color.popups.background, root.surfaceAlpha)
     anchorItem: root.anchorItem
     owner: root.barIdentity
     bar: root.bar
@@ -384,14 +404,147 @@ Panel {
           }
         }
 
+        Row {
+          spacing: Style.space(5)
+          Text {
+            text: "CARD BG"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            font.bold: true
+            anchors.verticalCenter: parent.verticalCenter
+          }
+
+          Repeater {
+            model: [
+              { label: "CLEAR", mode: 0 },
+              { label: "GLASS", mode: 1 },
+              { label: "SOLID", mode: 2 }
+            ]
+
+            delegate: Rectangle {
+              required property var modelData
+              readonly property bool selected: root.surfaceMode === modelData.mode
+              width: optionLabel.implicitWidth + Style.space(14)
+              height: Style.space(24)
+              radius: Style.space(5)
+              color: selected ? root.withAlpha(root.accent, 0.16) : "transparent"
+              border.width: 1
+              border.color: selected ? root.accent : root.withAlpha(root.foreground, 0.2)
+
+              Text {
+                id: optionLabel
+                anchors.centerIn: parent
+                text: modelData.label
+                color: parent.selected ? root.accent : root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: parent.selected
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: root.surfaceMode = modelData.mode
+              }
+            }
+          }
+        }
+
         Column {
           id: dashboard
           width: parent.width
           spacing: Style.space(8)
           visible: !root.connectionSettingsOpen
 
+        // This card names observed symptoms, never an unverified root cause.
+        Rectangle {
+          width: parent.width
+          height: diagnosisColumn.implicitHeight + Style.space(22)
+          radius: Style.space(8)
+          color: root.withAlpha(root.diagnosis.level === "alert" ? root.urgent : root.accent, 0.09)
+          border.width: 1
+          border.color: root.withAlpha(root.diagnosis.level === "alert" ? root.urgent : root.accent, 0.45)
+
+          Column {
+            id: diagnosisColumn
+            x: Style.space(11)
+            y: Style.space(11)
+            width: parent.width - Style.space(22)
+            spacing: Style.space(5)
+            Text {
+              text: "FINDING · " + root.diagnosis.headline
+              width: parent.width
+              color: root.diagnosis.level === "alert" ? root.urgent : root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.subtitle
+              font.bold: true
+              wrapMode: Text.WordWrap
+            }
+            Text {
+              text: "EVIDENCE  " + root.diagnosis.evidence
+              width: parent.width
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+            Text {
+              text: "BLIND SPOT  " + root.diagnosis.limit
+              width: parent.width
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+            Text {
+              text: "NEXT CHECK  " + root.diagnosis.next
+              width: parent.width
+              color: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+          }
+        }
+
+        Rectangle {
+          width: parent.width
+          height: Style.space(23)
+          radius: Style.space(4)
+          color: metricsMouse.containsMouse ? root.withAlpha(root.accent, 0.08) : "transparent"
+          Row {
+            anchors.fill: parent
+            anchors.leftMargin: Style.space(6)
+            spacing: Style.space(6)
+            Text {
+              text: root.metricsExpanded ? "−" : "+"
+              color: root.accent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              anchors.verticalCenter: parent.verticalCenter
+            }
+            Text {
+              text: "RUN METRICS"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              anchors.verticalCenter: parent.verticalCenter
+            }
+          }
+          MouseArea {
+            id: metricsMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.metricsExpanded = !root.metricsExpanded
+          }
+        }
+
         // ------------------------------------------------ architecture health
         Row {
+          visible: root.metricsExpanded
           width: parent.width
           spacing: Style.space(8)
 
@@ -506,6 +659,7 @@ Panel {
         Text {
           width: parent.width
           text: root.instrument.label
+          visible: root.instrument.state !== "current" || root.metricsExpanded
           color: root.instrument.state === "current" || root.instrument.state === "unknown"
             ? root.dim
             : root.urgent
@@ -531,7 +685,7 @@ Panel {
         // The whole window in one breath: volume, success, money, cache, latency.
         Flow {
           width: parent.width
-          visible: root.headlineFacts.length > 0
+          visible: root.metricsExpanded && root.headlineFacts.length > 0
           spacing: Style.space(10)
 
           Repeater {
@@ -565,7 +719,7 @@ Panel {
           width: parent.width
           height: 12
           spacing: 2
-          visible: root.outcomeStrip.length > 1
+          visible: root.metricsExpanded && root.outcomeStrip.length > 1
 
           Repeater {
             model: root.outcomeStrip
@@ -583,25 +737,42 @@ Panel {
           }
         }
 
-        // Deeper window facts, one line each; a line with nothing to say is gone.
-        Repeater {
-          model: root.windowLines
-
-          Text {
-            required property var modelData
-            width: column.width
-            text: modelData
-            color: root.dim
-            font.family: root.fontFamily
-            font.pixelSize: Style.font.caption
-            elide: Text.ElideRight
-          }
+        // Keep the first glance focused on the actual path; retain detailed
+        // window and JEV telemetry one click away, without changing the data.
+        Text {
+          width: parent.width
+          visible: root.jevStats.calls > 0 && root.metricsExpanded
+          text: "JEV API · " + root.jevStats.calls + " calls · "
+            + root.jevStats.success + " ok / " + root.jevStats.failed + " failed"
+            + (root.jevStats.costReported < root.jevStats.calls ? " · cost partly unknown" : "")
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          elide: Text.ElideRight
         }
 
-        Text {
-          width: column.width
-          text: root.jevStats.calls > 0
-            ? "JEV telemetry (latest ≤200): " + root.jevStats.calls + " calls · "
+        Column {
+          width: parent.width
+          spacing: Style.space(6)
+          visible: root.metricsExpanded
+          Repeater {
+            model: root.windowLines
+
+            Text {
+              required property var modelData
+              width: column.width
+              text: modelData
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
+            }
+          }
+
+          Text {
+            width: parent.width
+            text: root.jevStats.calls > 0
+              ? "JEV telemetry (latest ≤200): " + root.jevStats.calls + " calls · "
               + root.jevStats.success + " ok / " + root.jevStats.failed + " failed · "
               + "token-router " + root.jevStats.tokenRouter + " / model-router " + root.jevStats.modelRouter
               + (root.jevStats.usageReported > 0
@@ -613,17 +784,48 @@ Panel {
                 ? Model.fmtCost(root.jevStats.costUsd) + " (" + root.jevStats.costReported
                   + "/" + root.jevStats.calls + " priced)"
                 : "unknown")
-            : "JEV telemetry: no calls recorded by this panel yet"
-          color: root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          elide: Text.ElideRight
+              : "JEV telemetry: no calls recorded by this panel yet"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
+          }
         }
 
-        // ------------------------------------------------------- the graph
+        // The actual request path is the focal point, not the dashboard chrome.
+        Rectangle {
+          width: parent.width
+          height: graph.height + Style.space(50)
+            + (root.nodeInsight ? nodeInspector.height + Style.space(10) : 0)
+          radius: Style.space(10)
+          color: root.withAlpha(root.accent, 0.045)
+          border.width: 1
+          border.color: root.withAlpha(root.accent, 0.24)
+
+          Row {
+            x: Style.space(12)
+            y: Style.space(8)
+            spacing: Style.space(8)
+            Text {
+              text: "REQUEST PATH"
+              color: root.accent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+            }
+            Text {
+              text: root.active ? (root.viewingNewest ? "· latest" : "· history") : "· awaiting first run"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+          }
+
         Canvas {
           id: graph
-          width: column.width
+          x: Style.space(8)
+          y: Style.space(27)
+          width: parent.width - Style.space(16)
           readonly property var bounds: Model.contentBounds(root.arch)
           height: Math.round(width * bounds.h / bounds.w)
           antialiasing: true
@@ -652,12 +854,14 @@ Panel {
               var mid = (x1 + x2) / 2
               var live = Model.edgeTraversed(root.active, e.from, e.to)
 
-              ctx.strokeStyle = live ? root.withAlpha(root.accent, 0.9) : root.withAlpha(root.foreground, 0.14)
+              ctx.strokeStyle = live ? root.withAlpha(root.accent, 0.9) : root.withAlpha(root.foreground, 0.2)
               ctx.lineWidth = live ? 1.6 : 1
+              ctx.setLineDash(live ? [] : [4, 4])
               ctx.beginPath()
               ctx.moveTo(x1, y1)
               ctx.bezierCurveTo(mid, y1, mid, y2, x2, y2)
               ctx.stroke()
+              ctx.setLineDash([])
 
               // information flowing along the path the request took
               if (live && root.animating) {
@@ -699,9 +903,13 @@ Panel {
               ctx.fillStyle = status ? root.withAlpha(color, status === "error" ? 0.2 : 0.11)
                                      : root.withAlpha(root.foreground, 0.04)
               ctx.fill()
-              ctx.strokeStyle = status ? color : root.withAlpha(root.foreground, 0.2)
-              ctx.lineWidth = (status === "error" || status === "running") ? 1.7 : 1
+              ctx.strokeStyle = root.selectedNodeId === String(node.id) && status !== "error"
+                ? root.accent : (status ? color : root.withAlpha(root.foreground, 0.35))
+              ctx.lineWidth = root.selectedNodeId === String(node.id) ? 2.4
+                : ((status === "error" || status === "running") ? 1.7 : 1)
+              ctx.setLineDash(status ? [] : [4, 3])
               ctx.stroke()
+              ctx.setLineDash([])
 
               // Chinese name on the card, English + runtime detail underneath
               ctx.fillStyle = status ? color : root.dim
@@ -729,9 +937,92 @@ Panel {
             ctx.restore()
           }
 
+          MouseArea {
+            id: graphPointer
+            anchors.fill: parent
+            hoverEnabled: true
+            property string hoveredNodeId: ""
+            cursorShape: hoveredNodeId ? Qt.PointingHandCursor : Qt.ArrowCursor
+            onPositionChanged: function(mouse) {
+              hoveredNodeId = Model.nodeAtCanvasPoint(root.arch, graph.bounds, graph.width, mouse.x, mouse.y) || ""
+            }
+            onExited: hoveredNodeId = ""
+            onClicked: function(mouse) {
+              var id = Model.nodeAtCanvasPoint(root.arch, graph.bounds, graph.width, mouse.x, mouse.y)
+              root.selectedNodeId = id && id !== root.selectedNodeId ? id : ""
+              graph.requestPaint()
+            }
+          }
+
           function bezier(t, p0, p1, p2, p3) {
             var u = 1 - t
             return u * u * u * p0 + 3 * u * u * t * p1 + 3 * u * t * t * p2 + t * t * t * p3
+          }
+        }
+          Text {
+            x: Style.space(12)
+            y: graph.y + graph.height + Style.space(3)
+            text: "Click node to inspect  ·  Solid: reported  ·  Dashed: not reported ≠ skipped"
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            elide: Text.ElideRight
+            width: parent.width - Style.space(24)
+          }
+          Rectangle {
+            id: nodeInspector
+            x: Style.space(12)
+            y: graph.y + graph.height + Style.space(28)
+            width: parent.width - Style.space(24)
+            height: nodeInspectorContent.implicitHeight + Style.space(16)
+            visible: !!root.nodeInsight
+            radius: Style.space(6)
+            color: root.withAlpha(root.accent, 0.09)
+            border.width: 1
+            border.color: root.withAlpha(root.accent, 0.35)
+
+            Column {
+              id: nodeInspectorContent
+              x: Style.space(8)
+              y: Style.space(8)
+              width: parent.width - Style.space(16)
+              spacing: Style.space(4)
+              Text {
+                width: parent.width
+                text: root.nodeInsight ? "NODE · " + root.nodeInsight.label : ""
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                elide: Text.ElideRight
+              }
+              Text {
+                width: parent.width
+                text: root.nodeInsight ? "EVIDENCE  status " + root.nodeInsight.status
+                  + " · time " + root.nodeInsight.timing
+                  + " · " + root.nodeInsight.adjacent + " adjacent edge(s) reported" : ""
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+              Text {
+                width: parent.width
+                text: root.nodeInsight ? "BLIND SPOT  " + root.nodeInsight.limit : ""
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+              Text {
+                width: parent.width
+                text: root.nodeInsight ? "NEXT CHECK  " + root.nodeInsight.next : ""
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+            }
           }
         }
 
@@ -853,17 +1144,57 @@ Panel {
           color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.12)
         }
 
-        Text {
+        Rectangle {
+          id: recentHeader
+          width: parent.width
+          height: Style.space(26)
+          radius: Style.space(4)
           visible: root.recent.length > 0
-          text: "RECENT"
-          color: root.dim
-          font.family: root.fontFamily
-          font.pixelSize: Style.font.caption
-          font.bold: true
+          color: recentMouse.containsMouse ? root.withAlpha(root.accent, 0.08) : "transparent"
+
+          Row {
+            anchors.fill: parent
+            anchors.leftMargin: Style.space(6)
+            anchors.rightMargin: Style.space(6)
+            spacing: Style.space(6)
+
+            Text {
+              text: root.recentExpanded ? "−" : "+"
+              color: root.accent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              anchors.verticalCenter: parent.verticalCenter
+            }
+
+            Text {
+              text: "RECENT"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              anchors.verticalCenter: parent.verticalCenter
+            }
+
+            Text {
+              text: String(root.recent.length)
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              anchors.verticalCenter: parent.verticalCenter
+            }
+          }
+
+          MouseArea {
+            id: recentMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: root.recentExpanded = !root.recentExpanded
+          }
         }
 
         Repeater {
-          model: root.recent
+          model: root.recentExpanded ? root.recent : []
 
           Rectangle {
             required property var modelData
@@ -934,7 +1265,9 @@ Panel {
           width: parent.width
           visible: root.requests.length > 1
           text: root.viewingNewest
-            ? "Newest run · ↑↓ or click a row to inspect an earlier one"
+            ? (root.recentExpanded
+              ? "Newest run · ↑↓ or click a row to inspect an earlier one"
+              : "Newest run · expand RECENT to inspect earlier runs")
             : "Inspecting run " + (root.shownIndex + 1) + " of " + root.requests.length + " · ↑↓ to move, click it again for the newest"
           color: root.dim
           font.family: root.fontFamily

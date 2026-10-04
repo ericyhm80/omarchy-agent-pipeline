@@ -1,17 +1,23 @@
 # Agent Pipeline — see what your AI agent is actually doing
 
-**0.7.8:** an in-panel, explicit Connect flow for Codex CLI and Pi, plus a generic
-CLI path for other runtimes. Setup is local, preserves existing config, and is
-reversible; Pi request titles no longer contain prompt text. JEV call telemetry is
-observational only, never affects health scores, and remains unpriced when the model
-version or usage is unknown.
+**0.8.0:** a first-view evidence card and clickable request-path nodes distinguish
+reported events from unobserved stages, with a bounded next check instead of an
+unproven root cause. Metrics and recent runs are expandable; the card background
+can be clear, glass, or solid. The new Marketplace artwork includes a genuine
+local Pi run, not fabricated agent activity. The local popup component is derived
+from Omarchy's MIT-licensed KeyboardPanel; see [third-party notices](THIRD_PARTY_NOTICES.md).
 
-An Omarchy bar widget that renders **one pipeline per agent request**: how the
-request was classified, which model tier it was routed to, what memory was
-retrieved, which tools ran, and whether the result was verified — with timing,
-tokens and cost. Above the graph it also scores the running architecture on
-**stability, robustness and security**, and under the run it shows every runtime
-metric, so a glance tells you both what happened and how healthy the system is.
+**0.7.8:** explicit, reversible opt-in Connect flow for Codex CLI and Pi; a manual
+CLI checkpoint path for Claude Code, OpenClaw, Hermes, GrokBot, and other runtimes.
+Pi request titles are prompt-free. JEV call telemetry is observational only,
+never affects health scores, and remains unpriced when version or usage is unknown.
+
+An Omarchy bar widget that shows **reported evidence for one agent request**:
+which stages actually emitted events, what path they reported, and where the
+record has blind spots. Its first-view finding names a reported symptom and a
+next check, not an unverified root cause. When provided by the runtime, timing,
+tokens, cost and health signals remain available under **RUN METRICS**. A missing
+event never proves a stage did not run.
 
 It exists for two audiences:
 
@@ -20,7 +26,14 @@ It exists for two audiences:
   told it does. The panel is the picture you point at while explaining
   "classify → route → retrieve → act → verify".
 
-![pipeline panel](preview.png)
+![Agent Pipeline marketplace preview, featuring a real Pi run in the panel](preview.png)
+
+The preview is a promotional layout around a cropped capture of a live Pi run,
+not a fabricated UI. The finding and event counts reflect only what that reporter
+submitted, not a promise of full architecture coverage or future performance.
+The Pi reporter uses the fixed title `Pi turn` and does not save the prompt.
+The card background is selectable (CLEAR / GLASS / SOLID); the capture uses
+SOLID for legibility.
 
 ## What it shows
 
@@ -31,14 +44,19 @@ The panel draws the agent's architecture as a **graph**, not a list:
 - **edges** are how information travels, with labels;
 - the path a request **actually took** is highlighted, and while it is still running small
   dots flow along those edges;
-- each node carries its own state (`ok` / `running` / `warn` / `error` / `skipped`), a short
-  detail and its own duration;
+- solid nodes/edges are reported events; dashed ones have no reported event in
+  this run (this is **not** proof the stage was skipped). The fallback template
+  is a display aid, not a discovered agent architecture;
+- each reported node carries its state (`ok` / `running` / `warn` / `error` / `skipped`),
+  a reporter-supplied detail and its reported duration (only send non-sensitive metadata);
 - under the graph: the request's duration, tokens (input / output / cache), cost, model, and
   every problem encountered (`issues`).
 - the canvas is sized to the graph's own bounding box, so the panel stays compact whatever a
   runtime draws, and the UI is English throughout;
-- above the graph, **architecture health** — stability / robustness / security
-  scores with a one-line alert when one slips;
+- above the graph, a bounded **finding** with reported evidence, blind spots and
+  a suggested check. It is not an automatic root-cause claim;
+- under **RUN METRICS**, **architecture health** — stability / robustness /
+  security scores with an alert that remains visible when one slips;
 - a **window summary** — runs, success rate, spend, cache hit rate, median latency,
   rate and recency — and an **outcome strip** of the last runs;
 - a separate **JEV API summary** for the latest up to 200 external attempts across
@@ -60,7 +78,14 @@ run progresses. It is a synchronized view of the run, not a post-mortem — whic
 usable for explaining an agent to someone who has never seen one: what it classified the request
 as, which model it chose, what it retrieved, which tools it ran, and what went wrong.
 
-![pipeline graph](preview.png)
+The **REQUEST PATH** card keeps the reported execution path prominent. Click a
+node to inspect its bounded status, duration and adjacent edge count, plus a
+blind-spot warning and a suggested next check. Clicking again closes the
+inspector. It displays a safe stage ID rather than copying arbitrary node labels
+or details; it does not read prompts, commands or tool output. Reporter-submitted
+status is not independent proof of what happened inside an agent. **RUN METRICS**
+and **RECENT** can be expanded for telemetry and history without crowding the
+first view.
 
 ## JEV call telemetry
 
@@ -334,7 +359,7 @@ for opt-in setup, privacy boundaries, and removal instructions.
 | Pi | Optional reporter included | Select **Connect** in the panel to install the prompt-free Pi extension; restart/reload Pi afterward. |
 | Sovereign company-web | Yes, in that product integration | Its server emits request-specific routing and model stages. |
 | Codex CLI | Optional hook reporter included | Select **Connect** in the panel to merge hooks safely, then review/trust them with `/hooks`. New turns, local tool calls, and subagent activity are reported without prompts, command arguments, or tool output. |
-| Claude Code, Hermes, OpenClaw, or another runtime | Manual CLI/API only | Use the local writer to mark chosen lifecycle checkpoints; no bundled adapter or automatic discovery is included yet. See [manual reporting](docs/USAGE.md#manual-reporting-for-claude-code-hermes-and-openclaw). |
+| Claude Code, OpenClaw, Hermes, GrokBot, or another runtime | Manual CLI/API only | With the customer's explicit opt-in, use the local writer to mark chosen lifecycle checkpoints; no bundled adapter or automatic discovery is included yet. See [manual reporting](docs/USAGE.md#manual-reporting-for-other-agents). |
 
 The panel's **Connect** page checks only known reporter config paths when opened; it does
 not enumerate running processes, read agent docs, or make network requests. Connect
